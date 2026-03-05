@@ -1,8 +1,7 @@
 # Node dependencies
 node_modules/
 
-# TypeScript build output
-dist/
+# TypeScript build info
 *.tsbuildinfo
 
 # Environment files
