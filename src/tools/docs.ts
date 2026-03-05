@@ -163,7 +163,7 @@ function blockVersion(flavour: string): number {
   }
 }
 
-export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults: { workspaceId?: string }) {
+export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults: { workspaceId?: string; baseUrl?: string }) {
   // helpers
   function generateId(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
@@ -191,6 +191,67 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     if (value instanceof Y.Text) return value.toString();
     if (typeof value === "string") return value;
     return "";
+  }
+
+  type LinkContext = {
+    baseUrl: string;
+    workspaceId: string;
+    docIdToTitle: Map<string, string>;
+  };
+
+  /** Resolve link from delta op attributes. Returns { url, isLinkedPage } for LinkedPage refs. */
+  function resolveLinkFromAttrs(attrs: Record<string, unknown>): { url: string; isLinkedPage: boolean } | null {
+    const link = attrs.link ?? attrs.url;
+    if (typeof link === "string" && link.length > 0) return { url: link, isLinkedPage: false };
+    const ref = attrs.reference;
+    if (ref && typeof ref === "object" && ref !== null && "type" in ref && "pageId" in ref) {
+      const r = ref as { type: string; pageId: string };
+      if (r.type === "LinkedPage" && typeof r.pageId === "string") return { url: r.pageId, isLinkedPage: true };
+    }
+    return null;
+  }
+
+  /** Extract LinkedPage pageIds from a Y.Doc for title resolution. */
+  function extractLinkedPageIds(doc: Y.Doc): Set<string> {
+    const ids = new Set<string>();
+    const blocks = doc.getMap("blocks") as Y.Map<any>;
+    for (const [, block] of blocks) {
+      if (!(block instanceof Y.Map)) continue;
+      const propText = block.get("prop:text");
+      if (!(propText instanceof Y.Text)) continue;
+      const delta = propText.toDelta() as Array<{ attributes?: Record<string, unknown> }>;
+      for (const op of delta) {
+        const resolved = resolveLinkFromAttrs((op.attributes ?? {}) as Record<string, unknown>);
+        if (resolved?.isLinkedPage) ids.add(resolved.url);
+      }
+    }
+    return ids;
+  }
+
+  /** Converts Y.Text to markdown, preserving link attributes. Uses linkCtx for LinkedPage URL/title. */
+  function yTextToMarkdown(value: unknown, linkCtx?: LinkContext | null): string {
+    if (!(value instanceof Y.Text)) return asText(value);
+    const delta = value.toDelta() as Array<{ insert: string | object; attributes?: Record<string, unknown> }>;
+    let out = "";
+    for (const op of delta) {
+      const text = typeof op.insert === "string" ? op.insert : String(op.insert ?? "");
+      const attrs = (op.attributes ?? {}) as Record<string, unknown>;
+      const resolved = resolveLinkFromAttrs(attrs);
+      if (resolved) {
+        const displayText =
+          resolved.isLinkedPage && linkCtx && !(text || "").trim()
+            ? (linkCtx.docIdToTitle.get(resolved.url) || resolved.url)
+            : (text || resolved.url);
+        const href = resolved.isLinkedPage && linkCtx
+          ? `${linkCtx.baseUrl.replace(/\/$/, "")}/workspace/${linkCtx.workspaceId}/${resolved.url}`
+          : resolved.url;
+        if (displayText || href) out += `[${displayText}](${href})`;
+        else out += text;
+      } else {
+        out += text;
+      }
+    }
+    return out;
   }
 
   function childIdsFrom(value: unknown): string[] {
@@ -1831,7 +1892,8 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
 
   function collectDocForMarkdown(
     doc: Y.Doc,
-    tagOptionsById: Map<string, WorkspaceTagOption> = new Map()
+    tagOptionsById: Map<string, WorkspaceTagOption> = new Map(),
+    linkCtx?: LinkContext | null
   ): {
     title: string;
     tags: string[];
@@ -1877,12 +1939,14 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       }
 
       const childIds = childIdsFrom(block.get("sys:children"));
+      const propText = block.get("prop:text");
+      const textValue = yTextToMarkdown(propText, linkCtx) || null;
       const entry: MarkdownRenderableBlock = {
         id: blockId,
         parentId: asStringOrNull(block.get("sys:parent")),
         flavour: asStringOrNull(block.get("sys:flavour")),
         type: asStringOrNull(block.get("prop:type")),
-        text: asText(block.get("prop:text")) || null,
+        text: textValue,
         checked: typeof block.get("prop:checked") === "boolean" ? Boolean(block.get("prop:checked")) : null,
         language: asStringOrNull(block.get("prop:language")),
         childIds,
@@ -2565,7 +2629,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     getDocHandler as any
   );
 
-  const readDocHandler = async (parsed: { workspaceId?: string; docId: string }) => {
+  const readDocHandler = async (parsed: { workspaceId?: string; docId: string; includeDebug?: boolean }) => {
     const workspaceId = parsed.workspaceId || defaults.workspaceId;
     if (!workspaceId) {
       throw new Error("workspaceId is required. Provide it as a parameter or set AFFINE_WORKSPACE_ID in environment.");
@@ -2601,12 +2665,34 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       const doc = new Y.Doc();
       Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
 
+      const linkedPageIds = extractLinkedPageIds(doc);
+      const docIdToTitle = new Map<string, string>();
+      if (linkedPageIds.size > 0) {
+        for (const pageId of linkedPageIds) {
+          try {
+            const data = await gql.request<{ workspace: { doc?: { title: string } } }>(
+              `query GetDocTitle($workspaceId:String!,$docId:String!){ workspace(id:$workspaceId){ doc(docId:$docId){ title } } }`,
+              { workspaceId, docId: pageId }
+            );
+            const t = data.workspace?.doc?.title;
+            if (t) docIdToTitle.set(pageId, t);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      const baseUrl = (
+        (defaults.baseUrl ?? gql.endpoint.replace(/\/graphql\/?$/, "")) || "https://app.affine.pro"
+      ).replace(/\/$/, "");
+      const linkCtx = linkedPageIds.size > 0 ? { baseUrl, workspaceId, docIdToTitle } : null;
+
       const meta = doc.getMap("meta");
       const tags = resolveTagLabels(getStringArray(getTagArray(meta)), tagOptionsById);
       const blocks = doc.getMap("blocks") as Y.Map<any>;
       const pageId = findBlockIdByFlavour(blocks, "affine:page");
       const noteId = findBlockIdByFlavour(blocks, "affine:note");
       const visited = new Set<string>();
+      const includeDebug = parsed.includeDebug === true;
       const blockRows: Array<{
         id: string;
         parentId: string | null;
@@ -2616,6 +2702,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         checked: boolean | null;
         language: string | null;
         childIds: string[];
+        rawDelta?: unknown[];
       }> = [];
       const plainTextLines: string[] = [];
       let title = "";
@@ -2630,7 +2717,9 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         const flavour = raw.get("sys:flavour");
         const parentId = raw.get("sys:parent");
         const type = raw.get("prop:type");
-        const textValue = asText(raw.get("prop:text"));
+        const propText = raw.get("prop:text");
+        const textValue = yTextToMarkdown(propText, linkCtx);
+        const rawDelta = includeDebug && propText instanceof Y.Text ? propText.toDelta() : undefined;
         const language = raw.get("prop:language");
         const checked = raw.get("prop:checked");
         const childIds = childIdsFrom(raw.get("sys:children"));
@@ -2651,6 +2740,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
           checked: typeof checked === "boolean" ? checked : null,
           language: typeof language === "string" ? language : null,
           childIds,
+          ...(rawDelta !== undefined ? { rawDelta } : {}),
         });
 
         for (const childId of childIds) {
@@ -2691,6 +2781,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         docId: DocId,
+        includeDebug: z.boolean().optional().describe("If true, include rawDelta for each block (for debugging link/format parsing)"),
       },
     },
     readDocHandler as any
@@ -2918,7 +3009,30 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
 
       const doc = new Y.Doc();
       Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
-      const collected = collectDocForMarkdown(doc, tagOptionsById);
+
+      const linkedPageIds = extractLinkedPageIds(doc);
+      const docIdToTitle = new Map<string, string>();
+      if (linkedPageIds.size > 0) {
+        for (const pageId of linkedPageIds) {
+          try {
+            const data = await gql.request<{ workspace: { doc?: { title: string } } }>(
+              `query GetDocTitle($workspaceId:String!,$docId:String!){ workspace(id:$workspaceId){ doc(docId:$docId){ title } } }`,
+              { workspaceId, docId: pageId }
+            );
+            const title = data.workspace?.doc?.title;
+            if (title) docIdToTitle.set(pageId, title);
+          } catch {
+            /* ignore; will fall back to pageId */
+          }
+        }
+      }
+      const baseUrl = (
+        (defaults.baseUrl ?? gql.endpoint.replace(/\/graphql\/?$/, "")) || "https://app.affine.pro"
+      ).replace(/\/$/, "");
+      const linkCtx =
+        linkedPageIds.size > 0 ? { baseUrl, workspaceId, docIdToTitle } : null;
+
+      const collected = collectDocForMarkdown(doc, tagOptionsById, linkCtx);
       const rendered = renderBlocksToMarkdown({
         rootBlockIds: collected.rootBlockIds,
         blocksById: collected.blocksById,

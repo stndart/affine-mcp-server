@@ -94,7 +94,7 @@ async function buildServer() {
     console.error("Set AFFINE_API_TOKEN or run: affine-mcp login");
   }
   registerWorkspaceTools(server, gql);
-  registerDocTools(server, gql, { workspaceId: config.defaultWorkspaceId });
+  registerDocTools(server, gql, { workspaceId: config.defaultWorkspaceId, baseUrl: config.baseUrl });
   registerCommentTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   registerHistoryTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   registerUserTools(server, gql);
