@@ -42,7 +42,7 @@
     "test:playwright": "npx playwright test --config tests/playwright/playwright.config.ts",
     "pack:check": "npm pack --dry-run",
     "ci": "npm run build && npm run test:tool-manifest && npm run pack:check",
-    "prepare": "node -e \"console.log('node_modules exists:', require('fs').existsSync('node_modules'));try{console.log('node_modules contents:', require('fs').readdirSync('node_modules').slice(0,10))}catch(e){console.log('cannot read node_modules:', e.message)}\" && npm run build",
+    "prepare": "node -e \"if(!require('fs').existsSync('node_modules')){require('child_process').execSync('npm install --ignore-scripts',{stdio:'inherit'})}\" && npm run build",
     "prepublishOnly": "npm run ci"
   },
   "files": [
