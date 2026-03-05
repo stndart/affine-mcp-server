@@ -42,6 +42,7 @@
     "test:playwright": "npx playwright test --config tests/playwright/playwright.config.ts",
     "pack:check": "npm pack --dry-run",
     "ci": "npm run build && npm run test:tool-manifest && npm run pack:check",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run ci"
   },
   "files": [
