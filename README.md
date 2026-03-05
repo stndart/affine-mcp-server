@@ -48,6 +48,24 @@ npm i -g affine-mcp-server
 npx -y -p affine-mcp-server affine-mcp -- --version
 ```
 
+### Install from private fork (stndart)
+
+To use a private fork with link-preserving fixes from anywhere:
+
+```bash
+# Global install from your private fork (requires SSH key configured)
+npm i -g git+ssh://git@github.com/stndart/affine-mcp-server.git
+
+# Verify
+affine-mcp --version
+```
+
+Update to the latest from your fork:
+
+```bash
+npm update -g affine-mcp-server
+```
+
 The package installs a CLI named `affine-mcp` that runs the MCP server over stdio.
 
 Note: From v1.2.2+ the CLI wrapper (`bin/affine-mcp`) ensures Node runs the ESM entrypoint, preventing shell from misinterpreting JS.
@@ -361,6 +379,19 @@ node dist/index.js
 npm link
 # Now use `affine-mcp` like a global binary
 ```
+
+### Publish your fork as a private repo (stndart)
+
+1. Create a new **private** repo on GitHub: [github.com/new](https://github.com/new) → name `affine-mcp-server` under your account.
+2. Add the remote and push (SSH key must be configured):
+
+```bash
+cd affine-mcp-server
+git remote add stndart git@github.com:stndart/affine-mcp-server.git
+git push -u stndart main
+```
+
+3. Install globally from your fork (see "Install from private fork" above).
 
 ## Quality Gates
 
