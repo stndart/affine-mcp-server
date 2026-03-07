@@ -1,0 +1,56 @@
+# Create GitHub release with built package (fork naming: stndart/v*)
+# Tag e.g. stndart/v1.7.2 → release asset: affine-mcp-server-stndart-1.7.2.tgz
+name: Release
+
+on:
+  push:
+    tags:
+      - 'stndart/v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build and validate
+        run: npm run ci
+
+      - name: Pack
+        run: npm pack
+        id: pack
+
+      - name: Get version
+        id: version
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Rename asset (fork naming)
+        run: |
+          mv affine-mcp-server-*.tgz affine-mcp-server-stndart-${{ steps.version.outputs.version }}.tgz
+          echo "asset=affine-mcp-server-stndart-${{ steps.version.outputs.version }}.tgz" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }} (stndart fork)
+          body: |
+            AFFiNE MCP Server — stndart fork build.
+            Install: `npm install -g https://github.com/stndart/affine-mcp-server/releases/download/${{ steps.version.outputs.tag }}/affine-mcp-server-stndart-${{ steps.version.outputs.version }}.tgz`
+          files: affine-mcp-server-stndart-${{ steps.version.outputs.version }}.tgz
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

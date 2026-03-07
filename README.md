@@ -53,8 +53,9 @@ npx -y -p affine-mcp-server affine-mcp -- --version
 To use a private fork with link-preserving fixes from anywhere:
 
 ```bash
-npm install -g https://github.com/stndart/affine-mcp-server/releases/download/v1.7.2/affine-mcp-server-1.7.2.tgz
+npm install -g https://github.com/stndart/affine-mcp-server/releases/download/stndart%2Fv1.7.2/affine-mcp-server-stndart-1.7.2.tgz
 ```
+(Tags use the `stndart/v*` naming to avoid confusion with the upstream repo; asset names include `-stndart-`.)
 
 or
 
