@@ -5,7 +5,7 @@ import * as Y from "yjs";
 import FormData from "form-data";
 import fetch from "node-fetch";
 import { text } from "../util/mcp.js";
-import { connectWorkspaceSocket, joinWorkspace, pushDocUpdate, wsUrlFromGraphQLEndpoint } from "../ws.js";
+import { connectWorkspaceSocket, joinWorkspace, loadDoc, pushDocUpdate, wsUrlFromGraphQLEndpoint } from "../ws.js";
 
 // Generate AFFiNE-style document ID
 function generateDocId(): string {
@@ -131,13 +131,94 @@ function createInitialWorkspaceData(workspaceName: string = 'New Workspace', ava
   };
 }
 
+type WorkspaceSummary = {
+  id: string;
+  name?: string | null;
+  public?: boolean;
+  enableAi?: boolean;
+  createdAt?: string | number | null;
+  permissions?: Record<string, boolean> | null;
+};
+
+function getWorkspaceRootName(snapshotBase64: string | undefined): string | null {
+  if (!snapshotBase64) {
+    return null;
+  }
+
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Buffer.from(snapshotBase64, "base64"));
+  const meta = doc.getMap("meta");
+  const name = meta.get("name");
+  return typeof name === "string" && name.trim().length > 0 ? name : null;
+}
+
+async function loadWorkspaceNames(gql: GraphQLClient, workspaceIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (workspaceIds.length === 0) {
+    return names;
+  }
+
+  const endpoint = gql.endpoint;
+  const cookie = gql.cookie;
+  const bearer = gql.bearer;
+  const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+  const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+
+  try {
+    for (const workspaceId of workspaceIds) {
+      try {
+        await joinWorkspace(socket, workspaceId);
+        const snapshot = await loadDoc(socket, workspaceId, workspaceId);
+        const name = getWorkspaceRootName(snapshot.missing);
+        if (name) {
+          names.set(workspaceId, name);
+        }
+      } catch {
+        // Keep workspace listing available even if one root snapshot is unavailable.
+      }
+    }
+  } finally {
+    socket.disconnect();
+  }
+
+  return names;
+}
+
+async function withWorkspaceNames(
+  gql: GraphQLClient,
+  workspaces: WorkspaceSummary[]
+): Promise<WorkspaceSummary[]> {
+  const missingIds = workspaces
+    .filter((workspace) => !workspace.name || workspace.name.trim().length === 0)
+    .map((workspace) => workspace.id)
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+
+  if (missingIds.length === 0) {
+    return workspaces;
+  }
+
+  const names = await loadWorkspaceNames(gql, [...new Set(missingIds)]);
+  return workspaces.map((workspace) => ({
+    ...workspace,
+    name: workspace.name && workspace.name.trim().length > 0
+      ? workspace.name
+      : (names.get(workspace.id) ?? workspace.name ?? null),
+  }));
+}
+
 export function registerWorkspaceTools(server: McpServer, gql: GraphQLClient) {
   // LIST WORKSPACES
   const listWorkspacesHandler = async () => {
     try {
-      const query = `query { workspaces { id public enableAi createdAt } }`;
-      const data = await gql.request<{ workspaces: any[] }>(query);
-      return text(data.workspaces || []);
+      try {
+        const query = `query { workspaces { id name public enableAi createdAt } }`;
+        const data = await gql.request<{ workspaces: WorkspaceSummary[] }>(query);
+        return text(await withWorkspaceNames(gql, data.workspaces || []));
+      } catch {
+        const fallbackQuery = `query { workspaces { id public enableAi createdAt } }`;
+        const data = await gql.request<{ workspaces: WorkspaceSummary[] }>(fallbackQuery);
+        return text(await withWorkspaceNames(gql, data.workspaces || []));
+      }
     } catch (error: any) {
       return text({ error: error.message });
     }
@@ -155,20 +236,40 @@ export function registerWorkspaceTools(server: McpServer, gql: GraphQLClient) {
   // GET WORKSPACE
   const getWorkspaceHandler = async ({ id }: { id: string }) => {
     try {
-      const query = `query GetWorkspace($id: String!) { 
-        workspace(id: $id) { 
-          id 
-          public 
-          enableAi 
-          createdAt
-          permissions { 
-            Workspace_Read 
-            Workspace_CreateDoc 
+      try {
+        const query = `query GetWorkspace($id: String!) { 
+          workspace(id: $id) { 
+            id
+            name
+            public 
+            enableAi 
+            createdAt
+            permissions { 
+              Workspace_Read 
+              Workspace_CreateDoc 
+            } 
           } 
-        } 
-      }`;
-      const data = await gql.request<{ workspace: any }>(query, { id });
-      return text(data.workspace);
+        }`;
+        const data = await gql.request<{ workspace: WorkspaceSummary | null }>(query, { id });
+        const [workspace] = await withWorkspaceNames(gql, data.workspace ? [data.workspace] : []);
+        return text(workspace ?? null);
+      } catch {
+        const fallbackQuery = `query GetWorkspace($id: String!) { 
+          workspace(id: $id) { 
+            id 
+            public 
+            enableAi 
+            createdAt
+            permissions { 
+              Workspace_Read 
+              Workspace_CreateDoc 
+            } 
+          } 
+        }`;
+        const data = await gql.request<{ workspace: WorkspaceSummary | null }>(fallbackQuery, { id });
+        const [workspace] = await withWorkspaceNames(gql, data.workspace ? [data.workspace] : []);
+        return text(workspace ?? null);
+      }
     } catch (error: any) {
       return text({ error: error.message });
     }

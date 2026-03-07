@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig, VERSION } from "./config.js";
 import { GraphQLClient } from "./graphqlClient.js";
 import { registerWorkspaceTools } from "./tools/workspaces.js";
+import { registerCollectionTools } from "./tools/collections.js";
 import { registerDocTools } from "./tools/docs.js";
 import { registerCommentTools } from "./tools/comments.js";
 import { registerHistoryTools } from "./tools/history.js";
@@ -90,6 +91,7 @@ async function buildServer() {
         console.error("Set AFFINE_API_TOKEN or run: affine-mcp login");
     }
     registerWorkspaceTools(server, gql);
+    registerCollectionTools(server, gql, { workspaceId: config.defaultWorkspaceId });
     registerDocTools(server, gql, { workspaceId: config.defaultWorkspaceId, baseUrl: config.baseUrl });
     registerCommentTools(server, gql, { workspaceId: config.defaultWorkspaceId });
     registerHistoryTools(server, gql, { workspaceId: config.defaultWorkspaceId });

@@ -327,11 +327,18 @@ Endpoints currently available:
 ## Available Tools
 
 ### Workspace
-- `list_workspaces` – list all workspaces
-- `get_workspace` – get workspace details
+- `list_workspaces` – list all workspaces (includes workspace name)
+- `get_workspace` – get workspace details (includes workspace name)
 - `create_workspace` – create workspace with initial document
 - `update_workspace` – update workspace settings
 - `delete_workspace` – delete workspace permanently
+
+### Collections
+- `list_collections` – list all collections in a workspace
+- `get_collection` – get collection details
+- `create_collection` – create a collection
+- `update_collection` – update a collection
+- `delete_collection` – delete a collection
 
 ### Documents
 - `list_docs` – list documents with pagination (includes `node.tags`)

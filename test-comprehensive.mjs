@@ -6,9 +6,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const MCP_SERVER_PATH = './dist/index.js';
-const BASE_URL = process.env.AFFINE_BASE_URL || 'http://localhost:3010';
-const EMAIL = process.env.AFFINE_EMAIL || 'dev@affine.pro';
-const PASSWORD = process.env.AFFINE_PASSWORD || 'dev';
+const BASE_URL = process.env.AFFINE_BASE_URL || null;
+const EMAIL = process.env.AFFINE_EMAIL || null;
+const PASSWORD = process.env.AFFINE_PASSWORD || null;
 const LOGIN_MODE = process.env.AFFINE_LOGIN_AT_START || 'sync';
 const TOOL_TIMEOUT_MS = Number(process.env.MCP_TOOL_TIMEOUT_MS || '60000');
 const MANIFEST_PATH = path.join(process.cwd(), 'tool-manifest.json');
@@ -41,17 +41,18 @@ function isBlockedByEnvironment(_toolName, errorMessage) {
 
 class ComprehensiveRunner {
   constructor() {
+    const serverEnv = { ...process.env };
+    if (BASE_URL) serverEnv.AFFINE_BASE_URL = BASE_URL;
+    if (EMAIL) serverEnv.AFFINE_EMAIL = EMAIL;
+    if (PASSWORD) serverEnv.AFFINE_PASSWORD = PASSWORD;
+    if (LOGIN_MODE) serverEnv.AFFINE_LOGIN_AT_START = LOGIN_MODE;
+
     this.client = new Client({ name: 'affine-mcp-comprehensive-test', version: '3.0.0' });
     this.transport = new StdioClientTransport({
       command: 'node',
       args: [MCP_SERVER_PATH],
       cwd: process.cwd(),
-      env: {
-        AFFINE_BASE_URL: BASE_URL,
-        AFFINE_EMAIL: EMAIL,
-        AFFINE_PASSWORD: PASSWORD,
-        AFFINE_LOGIN_AT_START: LOGIN_MODE,
-      },
+      env: serverEnv,
       stderr: 'pipe',
     });
 
@@ -60,8 +61,10 @@ class ComprehensiveRunner {
     this.serverTools = [];
 
     this.workspaceId = null;
+    this.workspaceName = null;
     this.docId = null;
     this.markdownDocId = null;
+    this.collectionId = null;
     this.commentId = null;
     this.tokenId = null;
     this.blobKey = null;
@@ -155,11 +158,15 @@ class ComprehensiveRunner {
     }
 
     await this.callTool('current_user');
-    await this.callTool('sign_in', { email: EMAIL, password: PASSWORD });
+    if (EMAIL && PASSWORD) {
+      await this.callTool('sign_in', { email: EMAIL, password: PASSWORD });
+    }
 
+    const workspaceName = `mcp-main-${Date.now()}`;
     await this.callTool('list_workspaces');
-    await this.callTool('create_workspace', { name: `mcp-main-${Date.now()}` }, parsed => {
+    await this.callTool('create_workspace', { name: workspaceName }, parsed => {
       this.workspaceId = parsed?.id || null;
+      this.workspaceName = parsed?.name || workspaceName;
     });
 
     const workspaceId = this.workspaceId;
@@ -167,7 +174,24 @@ class ComprehensiveRunner {
       throw new Error('create_workspace did not return workspace id');
     }
 
-    await this.callTool('get_workspace', { id: workspaceId });
+    await this.callTool('get_workspace', { id: workspaceId }, parsed => {
+      if (parsed?.id !== workspaceId) {
+        throw new Error('get_workspace did not return the requested workspace');
+      }
+      if (parsed?.name !== this.workspaceName) {
+        throw new Error(`get_workspace did not include workspace name "${this.workspaceName}"`);
+      }
+    });
+    await this.callTool('list_workspaces', {}, parsed => {
+      const workspaces = Array.isArray(parsed) ? parsed : [];
+      const createdWorkspace = workspaces.find(entry => entry?.id === workspaceId);
+      if (!createdWorkspace) {
+        throw new Error('list_workspaces did not include the created workspace');
+      }
+      if (createdWorkspace?.name !== this.workspaceName) {
+        throw new Error(`list_workspaces did not include workspace name "${this.workspaceName}"`);
+      }
+    });
     await this.callTool('update_workspace', { id: workspaceId, public: false, enableAi: true });
 
     await this.callTool('list_docs', { workspaceId, first: 20 });
@@ -189,7 +213,82 @@ class ComprehensiveRunner {
     if (!docId) {
       throw new Error('create_doc did not return docId');
     }
+    const markdownDocId = this.markdownDocId;
     const tagName = `mcp-tag-${Date.now()}`;
+    const collectionName = `mcp-collection-${Date.now()}`;
+    const updatedCollectionName = `${collectionName}-updated`;
+
+    await this.callTool('list_collections', { workspaceId });
+    await this.callTool('create_collection', {
+      workspaceId,
+      name: collectionName,
+      allowList: [docId],
+      filters: [],
+    }, parsed => {
+      this.collectionId = parsed?.collection?.id || null;
+      if (parsed?.collection?.name !== collectionName) {
+        throw new Error('create_collection did not return the created name');
+      }
+    });
+    if (!this.collectionId) {
+      throw new Error('create_collection did not return collection id');
+    }
+    await this.callTool('get_collection', { workspaceId, collectionId: this.collectionId }, parsed => {
+      if (parsed?.collection?.id !== this.collectionId) {
+        throw new Error('get_collection did not return the requested collection');
+      }
+      if (parsed?.collection?.name !== collectionName) {
+        throw new Error('get_collection did not return the original collection name');
+      }
+      const allowList = Array.isArray(parsed?.collection?.allowList) ? parsed.collection.allowList : [];
+      if (!allowList.includes(docId)) {
+        throw new Error('get_collection did not preserve allowList');
+      }
+    });
+    await this.callTool('list_collections', { workspaceId }, parsed => {
+      const collections = Array.isArray(parsed?.collections) ? parsed.collections : [];
+      if (!collections.some(entry => entry?.id === this.collectionId && entry?.name === collectionName)) {
+        throw new Error('list_collections did not include created collection');
+      }
+    });
+    await this.callTool('update_collection', {
+      workspaceId,
+      collectionId: this.collectionId,
+      name: updatedCollectionName,
+      allowList: [docId, markdownDocId].filter(Boolean),
+      filters: [{ key: 'title', op: 'contains', value: 'Main' }],
+    }, parsed => {
+      if (parsed?.collection?.name !== updatedCollectionName) {
+        throw new Error('update_collection did not update the collection name');
+      }
+    });
+    await this.callTool('get_collection', { workspaceId, collectionId: this.collectionId }, parsed => {
+      if (parsed?.collection?.name !== updatedCollectionName) {
+        throw new Error('get_collection did not return updated collection name');
+      }
+      const allowList = Array.isArray(parsed?.collection?.allowList) ? parsed.collection.allowList : [];
+      if (!allowList.includes(docId)) {
+        throw new Error('updated collection allowList lost the main doc');
+      }
+      if (markdownDocId && !allowList.includes(markdownDocId)) {
+        throw new Error('updated collection allowList did not include markdown doc');
+      }
+      const filters = Array.isArray(parsed?.collection?.filters) ? parsed.collection.filters : [];
+      if (filters.length !== 1) {
+        throw new Error('updated collection did not preserve filters');
+      }
+    });
+    await this.callTool('delete_collection', { workspaceId, collectionId: this.collectionId }, parsed => {
+      if (!parsed?.deleted) {
+        throw new Error('delete_collection did not report deletion');
+      }
+    });
+    await this.callTool('list_collections', { workspaceId }, parsed => {
+      const collections = Array.isArray(parsed?.collections) ? parsed.collections : [];
+      if (collections.some(entry => entry?.id === this.collectionId)) {
+        throw new Error('list_collections still included deleted collection');
+      }
+    });
 
     await this.callTool('create_tag', { workspaceId, tag: tagName });
     await this.callTool('add_tag_to_doc', { workspaceId, docId, tag: tagName });
@@ -326,7 +425,27 @@ class ComprehensiveRunner {
     await this.callTool('delete_doc', { workspaceId, docId });
     await this.callTool('delete_workspace', { id: workspaceId });
 
-    const uncalledTools = this.serverTools.filter(name => !this.called.has(name));
+    const skippedTools = new Set();
+    if (!EMAIL || !PASSWORD) {
+      skippedTools.add('sign_in');
+    }
+
+    for (const name of skippedTools) {
+      if (this.called.has(name) || !this.serverTools.includes(name)) {
+        continue;
+      }
+      this.results.push({
+        name,
+        args: {},
+        ok: true,
+        blocked: true,
+        durationMs: 0,
+        error: 'Tool skipped because AFFINE_EMAIL/AFFINE_PASSWORD are not configured for this test run',
+        result: null,
+      });
+    }
+
+    const uncalledTools = this.serverTools.filter(name => !this.called.has(name) && !skippedTools.has(name));
     for (const name of uncalledTools) {
       this.results.push({
         name,
@@ -349,8 +468,8 @@ class ComprehensiveRunner {
     return {
       generatedAt: new Date().toISOString(),
       server: {
-        baseUrl: BASE_URL,
-        email: EMAIL,
+        baseUrl: BASE_URL || '(from config/default)',
+        email: EMAIL || '(from config/token auth)',
       },
       tools: {
         listed: this.serverTools.length,
