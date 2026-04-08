@@ -53,6 +53,8 @@ const APPEND_BLOCK_BOOKMARK_STYLE_VALUES = [
     "citation",
 ];
 const AppendBlockBookmarkStyle = z.enum(APPEND_BLOCK_BOOKMARK_STYLE_VALUES);
+const APPEND_BLOCK_DATA_VIEW_MODE_VALUES = ["table", "kanban"];
+const AppendBlockDataViewMode = z.enum(APPEND_BLOCK_DATA_VIEW_MODE_VALUES);
 function blockVersion(flavour) {
     switch (flavour) {
         case "affine:page":
@@ -78,10 +80,26 @@ export function registerDocTools(server, gql, defaults) {
         const bearer = gql.bearer;
         return { endpoint, cookie, bearer };
     }
+    const SELECT_COLORS = [
+        "var(--affine-tag-blue)", "var(--affine-tag-green)", "var(--affine-tag-red)",
+        "var(--affine-tag-orange)", "var(--affine-tag-purple)", "var(--affine-tag-yellow)",
+        "var(--affine-tag-teal)", "var(--affine-tag-pink)", "var(--affine-tag-gray)",
+    ];
     function makeText(content) {
         const yText = new Y.Text();
-        if (content.length > 0) {
-            yText.insert(0, content);
+        if (typeof content === "string") {
+            if (content.length > 0) {
+                yText.insert(0, content);
+            }
+            return yText;
+        }
+        let offset = 0;
+        for (const delta of content) {
+            if (!delta.insert) {
+                continue;
+            }
+            yText.insert(offset, delta.insert, delta.attributes ? { ...delta.attributes } : {});
+            offset += delta.insert.length;
         }
         return yText;
     }
@@ -777,6 +795,9 @@ export function registerDocTools(server, gql, defaults) {
         else if (raw.tableData !== undefined && normalized.strict) {
             throw new Error("The 'tableData' field can only be used with type='table'.");
         }
+        if (normalized.type !== "database" && normalized.type !== "data_view" && raw.viewMode !== undefined && normalized.strict) {
+            throw new Error("The 'viewMode' field can only be used with type='database' or type='data_view'.");
+        }
     }
     function normalizeAppendBlockInput(parsed) {
         const strict = parsed.strict !== false;
@@ -786,6 +807,7 @@ export function registerDocTools(server, gql, defaults) {
         const headingLevel = Math.max(1, Math.min(6, headingLevelNumber));
         const listStyle = typeInfo.listStyleFromAlias ?? parsed.style ?? "bulleted";
         const bookmarkStyle = parsed.bookmarkStyle ?? "horizontal";
+        const dataViewMode = parsed.viewMode ?? (typeInfo.type === "data_view" ? "kanban" : "table");
         const language = (parsed.language ?? "txt").trim().toLowerCase() || "txt";
         const placement = normalizePlacement(parsed.placement);
         const url = (parsed.url ?? "").trim();
@@ -806,6 +828,7 @@ export function registerDocTools(server, gql, defaults) {
         const columns = Number.isInteger(parsed.columns) ? parsed.columns : 3;
         const latex = (parsed.latex ?? "").trim();
         const tableData = Array.isArray(parsed.tableData) ? parsed.tableData : undefined;
+        const tableCellDeltas = Array.isArray(parsed.tableCellDeltas) ? parsed.tableCellDeltas : undefined;
         const normalized = {
             workspaceId: parsed.workspaceId,
             docId: parsed.docId,
@@ -834,11 +857,14 @@ export function registerDocTools(server, gql, defaults) {
             headingLevel,
             listStyle,
             bookmarkStyle,
+            dataViewMode,
             checked: Boolean(parsed.checked),
             language,
             caption: parsed.caption,
             legacyType: typeInfo.legacyType,
             tableData,
+            deltas: parsed.deltas,
+            tableCellDeltas,
         };
         validateNormalizedAppendBlockInput(normalized, parsed);
         return normalized;
@@ -989,6 +1015,102 @@ export function registerDocTools(server, gql, defaults) {
         }
         return { parentId, parentBlock, children, insertIndex };
     }
+    function createDatabaseViewColumn(columnId, width = 200, hide = false) {
+        const column = new Y.Map();
+        column.set("id", columnId);
+        column.set("width", width);
+        column.set("hide", hide);
+        return column;
+    }
+    function createDatabaseColumnDefinition(input) {
+        const column = new Y.Map();
+        column.set("id", input.id);
+        column.set("name", input.name);
+        column.set("type", input.type);
+        column.set("width", input.width ?? 200);
+        if ((input.type === "select" || input.type === "multi-select") && input.options?.length) {
+            const data = new Y.Map();
+            const options = new Y.Array();
+            input.options.forEach((value, index) => {
+                const option = new Y.Map();
+                option.set("id", generateId());
+                option.set("value", value);
+                option.set("color", SELECT_COLORS[index % SELECT_COLORS.length]);
+                options.push([option]);
+            });
+            data.set("options", options);
+            column.set("data", data);
+        }
+        return column;
+    }
+    function createPresetBackedDataViewBlock(blockId, titleText, viewMode, blockType) {
+        const block = new Y.Map();
+        setSysFields(block, blockId, "affine:database");
+        block.set("sys:parent", null);
+        block.set("sys:children", new Y.Array());
+        block.set("prop:title", makeText(titleText));
+        block.set("prop:cells", new Y.Map());
+        block.set("prop:comments", undefined);
+        const titleColumnId = generateId();
+        const columns = new Y.Array();
+        columns.push([createDatabaseColumnDefinition({
+                id: titleColumnId,
+                name: "Title",
+                type: "title",
+                width: 320,
+            })]);
+        const viewColumns = new Y.Array();
+        viewColumns.push([createDatabaseViewColumn(titleColumnId, 320, false)]);
+        const header = {
+            titleColumn: titleColumnId,
+            iconColumn: "type",
+        };
+        let groupBy = null;
+        let groupProperties = null;
+        if (viewMode === "kanban") {
+            const statusColumnId = generateId();
+            columns.push([createDatabaseColumnDefinition({
+                    id: statusColumnId,
+                    name: "Status",
+                    type: "select",
+                    options: ["Todo", "In Progress", "Done"],
+                })]);
+            viewColumns.push([createDatabaseViewColumn(statusColumnId, 200, false)]);
+            groupBy = {
+                columnId: statusColumnId,
+                name: "select",
+                type: "groupBy",
+            };
+            groupProperties = [];
+        }
+        const view = new Y.Map();
+        view.set("id", generateId());
+        view.set("name", viewMode === "kanban" ? "Kanban View" : "Table View");
+        view.set("mode", viewMode);
+        view.set("columns", viewColumns);
+        view.set("filter", { type: "group", op: "and", conditions: [] });
+        if (groupBy) {
+            view.set("groupBy", groupBy);
+        }
+        else {
+            view.set("groupBy", null);
+        }
+        if (groupProperties) {
+            view.set("groupProperties", groupProperties);
+        }
+        view.set("sort", null);
+        view.set("header", header);
+        const views = new Y.Array();
+        views.push([view]);
+        block.set("prop:columns", columns);
+        block.set("prop:views", views);
+        return {
+            blockId,
+            block,
+            flavour: "affine:database",
+            blockType,
+        };
+    }
     function createBlock(normalized) {
         const blockId = generateId();
         const block = new Y.Map();
@@ -1016,7 +1138,7 @@ export function registerDocTools(server, gql, defaults) {
                 block.set("sys:children", new Y.Array());
                 block.set("prop:type", normalized.listStyle);
                 block.set("prop:checked", normalized.listStyle === "todo" ? normalized.checked : false);
-                block.set("prop:text", makeText(content));
+                block.set("prop:text", makeText(normalized.deltas ?? content));
                 return { blockId, block, flavour: "affine:list", blockType: normalized.listStyle };
             }
             case "code": {
@@ -1074,33 +1196,57 @@ export function registerDocTools(server, gql, defaults) {
                 setSysFields(block, blockId, "affine:table");
                 block.set("sys:parent", null);
                 block.set("sys:children", new Y.Array());
-                const rows = {};
-                const columns = {};
-                const cells = {};
+                // AFFiNE reads table props as flat dot-notation keys on the block Y.Map:
+                //   prop:rows.{rowId}.rowId, prop:rows.{rowId}.order
+                //   prop:columns.{colId}.columnId, prop:columns.{colId}.order
+                //   prop:cells.{rowId}:{colId}.text  (Y.Text, NOT a nested Y.Map)
+                // Using nested Y.Maps (the old approach) causes cells to be invisible in the UI.
                 const rowIds = [];
                 const columnIds = [];
                 const tableData = normalized.tableData ?? [];
                 for (let i = 0; i < normalized.rows; i++) {
                     const rowId = generateId();
-                    rows[rowId] = { rowId, order: `r${String(i).padStart(4, "0")}` };
+                    block.set(`prop:rows.${rowId}.rowId`, rowId);
+                    block.set(`prop:rows.${rowId}.order`, `r${String(i).padStart(4, "0")}`);
                     rowIds.push(rowId);
                 }
                 for (let i = 0; i < normalized.columns; i++) {
                     const columnId = generateId();
-                    columns[columnId] = { columnId, order: `c${String(i).padStart(4, "0")}` };
+                    block.set(`prop:columns.${columnId}.columnId`, columnId);
+                    block.set(`prop:columns.${columnId}.order`, `c${String(i).padStart(4, "0")}`);
                     columnIds.push(columnId);
                 }
                 for (let rowIndex = 0; rowIndex < rowIds.length; rowIndex += 1) {
                     const rowId = rowIds[rowIndex];
+                    const isHeader = rowIndex === 0;
                     for (let columnIndex = 0; columnIndex < columnIds.length; columnIndex += 1) {
                         const columnId = columnIds[columnIndex];
                         const cellText = tableData[rowIndex]?.[columnIndex] ?? "";
-                        cells[`${rowId}:${columnId}`] = { text: cellText };
+                        const cellDeltas = normalized.tableCellDeltas?.[rowIndex]?.[columnIndex] ?? [];
+                        const cellYText = new Y.Text();
+                        // First row is always rendered bold (header row convention)
+                        if (cellDeltas.length > 0) {
+                            let offset = 0;
+                            for (const delta of cellDeltas) {
+                                if (!delta.insert) {
+                                    continue;
+                                }
+                                const attrs = isHeader
+                                    ? { ...(delta.attributes ?? {}), bold: true }
+                                    : (delta.attributes ? { ...delta.attributes } : {});
+                                cellYText.insert(offset, delta.insert, attrs);
+                                offset += delta.insert.length;
+                            }
+                        }
+                        else if (isHeader && cellText) {
+                            cellYText.insert(0, cellText, { bold: true });
+                        }
+                        else {
+                            cellYText.insert(0, cellText);
+                        }
+                        block.set(`prop:cells.${rowId}:${columnId}.text`, cellYText);
                     }
                 }
-                block.set("prop:rows", rows);
-                block.set("prop:columns", columns);
-                block.set("prop:cells", cells);
                 block.set("prop:comments", undefined);
                 block.set("prop:textAlign", undefined);
                 return { blockId, block, flavour: "affine:table" };
@@ -1297,6 +1443,9 @@ export function registerDocTools(server, gql, defaults) {
                 return { blockId, block, flavour: "affine:embed-iframe" };
             }
             case "database": {
+                if (normalized.dataViewMode === "kanban") {
+                    return createPresetBackedDataViewBlock(blockId, normalized.text, "kanban", "database_kanban");
+                }
                 setSysFields(block, blockId, "affine:database");
                 block.set("sys:parent", null);
                 block.set("sys:children", new Y.Array());
@@ -1320,28 +1469,7 @@ export function registerDocTools(server, gql, defaults) {
                 return { blockId, block, flavour: "affine:database" };
             }
             case "data_view": {
-                // AFFiNE 0.26.x currently crashes on raw affine:data-view render path.
-                // Keep API compatibility for type="data_view" by mapping it to the stable database block.
-                setSysFields(block, blockId, "affine:database");
-                block.set("sys:parent", null);
-                block.set("sys:children", new Y.Array());
-                const dvDefaultView = new Y.Map();
-                dvDefaultView.set("id", generateId());
-                dvDefaultView.set("name", "Table View");
-                dvDefaultView.set("mode", "table");
-                dvDefaultView.set("columns", new Y.Array());
-                dvDefaultView.set("filter", { type: "group", op: "and", conditions: [] });
-                dvDefaultView.set("groupBy", null);
-                dvDefaultView.set("sort", null);
-                dvDefaultView.set("header", { titleColumn: null, iconColumn: null });
-                const dvViews = new Y.Array();
-                dvViews.push([dvDefaultView]);
-                block.set("prop:views", dvViews);
-                block.set("prop:title", makeText(content));
-                block.set("prop:cells", new Y.Map());
-                block.set("prop:columns", new Y.Array());
-                block.set("prop:comments", undefined);
-                return { blockId, block, flavour: "affine:database", blockType: "data_view_fallback" };
+                return createPresetBackedDataViewBlock(blockId, normalized.text, normalized.dataViewMode, `data_view_${normalized.dataViewMode}`);
             }
             case "surface_ref": {
                 setSysFields(block, blockId, "affine:surface-ref");
@@ -1485,6 +1613,15 @@ export function registerDocTools(server, gql, defaults) {
                     strict,
                     placement,
                 };
+            case "callout":
+                return {
+                    workspaceId,
+                    docId,
+                    type: "callout",
+                    text: operation.text,
+                    strict,
+                    placement,
+                };
             case "list":
                 return {
                     workspaceId,
@@ -1493,6 +1630,7 @@ export function registerDocTools(server, gql, defaults) {
                     text: operation.text,
                     style: operation.style,
                     checked: operation.checked,
+                    deltas: operation.deltas,
                     strict,
                     placement,
                 };
@@ -1522,6 +1660,7 @@ export function registerDocTools(server, gql, defaults) {
                     rows: operation.rows,
                     columns: operation.columns,
                     tableData: operation.tableData,
+                    tableCellDeltas: operation.tableCellDeltas,
                     strict,
                     placement,
                 };
@@ -1907,6 +2046,10 @@ export function registerDocTools(server, gql, defaults) {
         const data = await gql.request(query, { workspaceId, first: parsed.first, offset: parsed.offset, after: parsed.after });
         const docs = data.workspace.docs;
         const tagsByDocId = new Map();
+        const titlesByDocId = new Map();
+        let workspacePageCount = null;
+        let workspacePageIds = null;
+        const deletedDocIds = new Set();
         try {
             const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
             const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
@@ -1919,10 +2062,29 @@ export function registerDocTools(server, gql, defaults) {
                     Y.applyUpdate(wsDoc, Buffer.from(snapshot.missing, "base64"));
                     const meta = wsDoc.getMap("meta");
                     const pages = getWorkspacePageEntries(meta);
+                    workspacePageCount = pages.length;
+                    workspacePageIds = new Set(pages.map(page => page.id));
                     const { byId } = getWorkspaceTagOptionMaps(meta);
                     for (const page of pages) {
+                        if (page.title) {
+                            titlesByDocId.set(page.id, page.title);
+                        }
                         const tagEntries = getStringArray(page.tagsArray);
                         tagsByDocId.set(page.id, resolveTagLabels(tagEntries, byId));
+                    }
+                }
+                const graphEdges = Array.isArray(docs?.edges) ? docs.edges : [];
+                if (workspacePageIds && graphEdges.length > workspacePageIds.size) {
+                    for (const edge of graphEdges) {
+                        const nodeId = edge?.node?.id;
+                        if (typeof nodeId !== "string" || workspacePageIds.has(nodeId)) {
+                            continue;
+                        }
+                        const edgeSnapshot = await loadDoc(socket, workspaceId, nodeId);
+                        const edgeExists = Boolean(edgeSnapshot.missing || edgeSnapshot.state || edgeSnapshot.timestamp);
+                        if (!edgeExists) {
+                            deletedDocIds.add(nodeId);
+                        }
                     }
                 }
             }
@@ -1933,23 +2095,46 @@ export function registerDocTools(server, gql, defaults) {
         catch {
             // Keep list_docs available even when workspace snapshot fetch fails.
         }
+        const mergedEdges = Array.isArray(docs?.edges)
+            ? docs.edges.map((edge) => {
+                const node = edge?.node;
+                if (!node || typeof node.id !== "string") {
+                    return edge;
+                }
+                return {
+                    ...edge,
+                    node: {
+                        ...node,
+                        title: titlesByDocId.get(node.id) || node.title,
+                        tags: tagsByDocId.get(node.id) || [],
+                    },
+                };
+            })
+            : [];
+        const visibleEdges = deletedDocIds.size > 0
+            ? mergedEdges.filter((edge) => !deletedDocIds.has(edge?.node?.id))
+            : mergedEdges;
+        const correctedTotalCount = typeof docs?.totalCount === "number" &&
+            typeof workspacePageCount === "number" &&
+            (deletedDocIds.size > 0 ||
+                visibleEdges.length === workspacePageCount) &&
+            workspacePageCount < docs.totalCount
+            ? workspacePageCount
+            : docs?.totalCount;
+        const correctedPageInfo = docs?.pageInfo
+            ? {
+                ...docs.pageInfo,
+                endCursor: visibleEdges.length > 0 ? visibleEdges[visibleEdges.length - 1]?.cursor ?? null : null,
+                hasNextPage: typeof correctedTotalCount === "number" && !parsed.after
+                    ? (parsed.offset ?? 0) + visibleEdges.length < correctedTotalCount
+                    : docs.pageInfo.hasNextPage,
+            }
+            : docs?.pageInfo;
         const mergedDocs = {
             ...docs,
-            edges: Array.isArray(docs?.edges)
-                ? docs.edges.map((edge) => {
-                    const node = edge?.node;
-                    if (!node || typeof node.id !== "string") {
-                        return edge;
-                    }
-                    return {
-                        ...edge,
-                        node: {
-                            ...node,
-                            tags: tagsByDocId.get(node.id) || [],
-                        },
-                    };
-                })
-                : [],
+            totalCount: correctedTotalCount,
+            pageInfo: correctedPageInfo,
+            edges: visibleEdges,
         };
         return text(mergedDocs);
     };
@@ -2017,6 +2202,129 @@ export function registerDocTools(server, gql, defaults) {
             socket.disconnect();
         }
     };
+    const getSearchMatchRank = (title, normalizedQuery, matchMode) => {
+        if (!title)
+            return null;
+        const normalizedTitle = title.toLocaleLowerCase();
+        const isExact = normalizedTitle === normalizedQuery;
+        const isPrefix = normalizedTitle.startsWith(normalizedQuery);
+        const isSubstring = normalizedTitle.includes(normalizedQuery);
+        if (matchMode === "exact") {
+            return isExact ? 0 : null;
+        }
+        if (matchMode === "prefix") {
+            return isPrefix ? (isExact ? 0 : 1) : null;
+        }
+        if (isExact)
+            return 0;
+        if (isPrefix)
+            return 1;
+        if (isSubstring)
+            return 2;
+        return null;
+    };
+    // search_docs: fast title search via workspace metadata (no per-doc loading needed)
+    const searchDocsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const q = (parsed.query ?? "").toLocaleLowerCase().trim();
+        if (!q)
+            throw new Error("query is required.");
+        const limit = parsed.limit ?? 20;
+        const matchMode = parsed.matchMode ?? "substring";
+        const sortBy = parsed.sortBy ?? "relevance";
+        const sortDirection = parsed.sortDirection ?? "desc";
+        const normalizedTag = (parsed.tag ?? "").toLocaleLowerCase().trim();
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const snapshot = await loadDoc(socket, workspaceId, workspaceId);
+            if (!snapshot.missing) {
+                return text({ query: q, results: [], totalCount: 0 });
+            }
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(snapshot.missing, "base64"));
+            const meta = wsDoc.getMap("meta");
+            const pages = getWorkspacePageEntries(meta);
+            const { byId } = getWorkspaceTagOptionMaps(meta);
+            const baseUrl = (process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '');
+            const filtered = pages
+                .map((page) => {
+                const rank = getSearchMatchRank(page.title, q, matchMode);
+                if (rank === null) {
+                    return null;
+                }
+                const tags = resolveTagLabels(getStringArray(page.tagsArray), byId);
+                if (normalizedTag && !tags.some((tag) => tag.toLocaleLowerCase().includes(normalizedTag))) {
+                    return null;
+                }
+                const updatedTimestamp = page.updatedDate ?? page.createDate ?? 0;
+                return {
+                    docId: page.id,
+                    title: page.title,
+                    tags,
+                    updatedAt: updatedTimestamp > 0 ? new Date(updatedTimestamp).toISOString() : null,
+                    updatedTimestamp,
+                    url: `${baseUrl}/workspace/${workspaceId}/${page.id}`,
+                    rank,
+                };
+            })
+                .filter((entry) => entry !== null);
+            filtered.sort((a, b) => {
+                if (sortBy === "updatedAt") {
+                    const diff = a.updatedTimestamp - b.updatedTimestamp;
+                    if (diff !== 0) {
+                        return sortDirection === "asc" ? diff : -diff;
+                    }
+                }
+                else if (a.rank !== b.rank) {
+                    return a.rank - b.rank;
+                }
+                else if (a.updatedTimestamp !== b.updatedTimestamp) {
+                    return b.updatedTimestamp - a.updatedTimestamp;
+                }
+                return (a.title ?? "").localeCompare(b.title ?? "");
+            });
+            const totalCount = filtered.length;
+            const matches = filtered
+                .slice(0, limit)
+                .map((entry) => ({
+                docId: entry.docId,
+                title: entry.title,
+                tags: entry.tags,
+                updatedAt: entry.updatedAt,
+                url: entry.url,
+            }));
+            return text({
+                query: parsed.query,
+                tag: parsed.tag ?? null,
+                matchMode,
+                sortBy,
+                sortDirection,
+                totalCount,
+                results: matches,
+            });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("search_docs", {
+        title: "Search Documents by Title",
+        description: "Fast search for documents by title using workspace metadata. Much faster than exporting each doc. Returns docId, title, and direct URL for each match.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)."),
+            query: z.string().describe("Search query — matched case-insensitively against doc titles."),
+            limit: z.number().optional().describe("Max results to return (default: 20)."),
+            matchMode: z.enum(["substring", "prefix", "exact"]).optional().describe("How to match titles (default: substring)."),
+            tag: z.string().optional().describe("Optional tag filter (case-insensitive substring match against resolved tag names)."),
+            sortBy: z.enum(["relevance", "updatedAt"]).optional().describe("Sort by match relevance (default) or by updatedAt."),
+            sortDirection: z.enum(["asc", "desc"]).optional().describe("Sort direction for updatedAt sorting (default: desc)."),
+        },
+    }, searchDocsHandler);
     server.registerTool("list_tags", {
         title: "List Tags",
         description: "List all tags in a workspace and the number of docs attached to each tag.",
@@ -2392,6 +2700,16 @@ export function registerDocTools(server, gql, defaults) {
                     visit(blockId);
                 }
             }
+            // If includeMarkdown is requested, reuse the same render path as export_doc_markdown
+            let markdown;
+            if (parsed.includeMarkdown) {
+                const collected = collectDocForMarkdown(doc, new Map());
+                const rendered = renderBlocksToMarkdown({
+                    rootBlockIds: collected.rootBlockIds,
+                    blocksById: collected.blocksById,
+                });
+                markdown = rendered.markdown;
+            }
             return text({
                 docId: parsed.docId,
                 title: title || null,
@@ -2400,6 +2718,7 @@ export function registerDocTools(server, gql, defaults) {
                 blockCount: blockRows.length,
                 blocks: blockRows,
                 plainText: plainTextLines.join("\n"),
+                ...(markdown !== undefined ? { markdown } : {}),
             });
         }
         finally {
@@ -2408,13 +2727,97 @@ export function registerDocTools(server, gql, defaults) {
     };
     server.registerTool("read_doc", {
         title: "Read Document Content",
-        description: "Read document block content via WebSocket snapshot (blocks + plain text).",
+        description: "Read document block content via WebSocket snapshot (blocks + plain text). Set includeMarkdown: true to also get the rendered markdown — useful when you need to read content without a separate export_doc_markdown call.",
         inputSchema: {
             workspaceId: WorkspaceId.optional(),
             docId: DocId,
-            includeDebug: z.boolean().optional().describe("If true, include rawDelta for each block (for debugging link/format parsing)"),
+            includeMarkdown: z.boolean().optional().describe("If true, includes rendered markdown in the response. Equivalent to also calling export_doc_markdown."),
+            includeDebug: z.boolean().optional().describe("If true, includes debug information like raw delta data for text blocks."),
         },
     }, readDocHandler);
+    // move_doc: move a doc in the sidebar by removing its embed_linked_doc from the old parent
+    // and adding it to the new parent. fromParentDocId is optional — if omitted, only adds to new parent.
+    const moveDocHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            let removedFromParent = false;
+            // Step 1: remove embed_linked_doc from old parent (if provided)
+            if (parsed.fromParentDocId) {
+                const parentDoc = new Y.Doc();
+                const parentSnapshot = await loadDoc(socket, workspaceId, parsed.fromParentDocId);
+                if (parentSnapshot.missing) {
+                    Y.applyUpdate(parentDoc, Buffer.from(parentSnapshot.missing, "base64"));
+                    const prevSV = Y.encodeStateVector(parentDoc);
+                    const blocks = parentDoc.getMap("blocks");
+                    // Find the embed_linked_doc block pointing to our docId
+                    let embedBlockId = null;
+                    let embedParentChildren = null;
+                    let embedIndex = -1;
+                    for (const [id, raw] of blocks) {
+                        if (!(raw instanceof Y.Map))
+                            continue;
+                        const flavour = raw.get("sys:flavour");
+                        const pageId = raw.get("prop:pageId");
+                        if (flavour === "affine:embed-linked-doc" && pageId === parsed.docId) {
+                            embedBlockId = String(id);
+                            break;
+                        }
+                    }
+                    if (embedBlockId) {
+                        // Find the parent block whose sys:children contains embedBlockId
+                        for (const [, raw] of blocks) {
+                            if (!(raw instanceof Y.Map))
+                                continue;
+                            const children = raw.get("sys:children");
+                            if (!(children instanceof Y.Array))
+                                continue;
+                            const arr = children.toArray();
+                            const idx = arr.indexOf(embedBlockId);
+                            if (idx >= 0) {
+                                embedParentChildren = children;
+                                embedIndex = idx;
+                                break;
+                            }
+                        }
+                        if (embedParentChildren && embedIndex >= 0) {
+                            embedParentChildren.delete(embedIndex, 1);
+                        }
+                        blocks.delete(embedBlockId);
+                        const delta = Y.encodeStateAsUpdate(parentDoc, prevSV);
+                        await pushDocUpdate(socket, workspaceId, parsed.fromParentDocId, Buffer.from(delta).toString("base64"));
+                        removedFromParent = true;
+                    }
+                }
+            }
+            // Step 2: add embed_linked_doc to new parent
+            await appendBlockInternal({
+                workspaceId,
+                docId: parsed.toParentDocId,
+                type: "embed_linked_doc",
+                pageId: parsed.docId,
+            });
+            return text({ moved: true, docId: parsed.docId, toParentDocId: parsed.toParentDocId, removedFromParent });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("move_doc", {
+        title: "Move Document in Sidebar",
+        description: "Move a doc in the AFFiNE sidebar by embedding it under a new parent. Optionally removes it from the old parent (fromParentDocId). If fromParentDocId is omitted, the doc is added to the new parent but not removed from the old one.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The doc to move."),
+            toParentDocId: z.string().describe("The new parent doc that will contain the embed."),
+            fromParentDocId: z.string().optional().describe("The current parent doc to remove the embed from. If omitted, only adds to new parent."),
+        },
+    }, moveDocHandler);
     const publishDocHandler = async (parsed) => {
         const workspaceId = parsed.workspaceId || defaults.workspaceId;
         if (!workspaceId) {
@@ -2523,6 +2926,7 @@ export function registerDocTools(server, gql, defaults) {
             level: z.number().int().min(1).max(6).optional().describe("Heading level for type=heading"),
             style: AppendBlockListStyle.optional().describe("List style for type=list"),
             bookmarkStyle: AppendBlockBookmarkStyle.optional().describe("Bookmark card style"),
+            viewMode: AppendBlockDataViewMode.optional().describe("Initial data view preset for type=database or type=data_view. Defaults: database=table, data_view=kanban"),
             checked: z.boolean().optional().describe("Todo state when type is todo"),
             language: z.string().optional().describe("Code language when type is code"),
             caption: z.string().optional().describe("Code caption when type is code"),
@@ -2633,7 +3037,9 @@ export function registerDocTools(server, gql, defaults) {
             includeFrontmatter: z.boolean().optional(),
         },
     }, exportDocMarkdownHandler);
-    const createDocFromMarkdownHandler = async (parsed) => {
+    // Core logic for creating a doc from markdown — returns structured data, no MCP envelope.
+    // Used by both createDocFromMarkdownHandler and batchCreateDocsHandler.
+    const createDocFromMarkdownCore = async (parsed) => {
         const parsedMarkdown = parseMarkdownToOperations(parsed.markdown);
         let operations = [...parsedMarkdown.operations];
         let title = (parsed.title ?? "").trim();
@@ -2664,13 +3070,35 @@ export function registerDocTools(server, gql, defaults) {
                 strict: parsed.strict,
             });
         }
-        const applyWarnings = applied.skippedCount > 0
-            ? [`${applied.skippedCount} markdown block(s) could not be applied to AFFiNE and were skipped.`]
-            : [];
-        return text({
+        // If parentDocId is provided, embed the new doc into the parent so it
+        // appears in the sidebar as a child instead of being an orphan.
+        let linkedToParent = false;
+        if (parsed.parentDocId) {
+            try {
+                await appendBlockInternal({
+                    workspaceId: created.workspaceId,
+                    docId: parsed.parentDocId,
+                    type: "embed_linked_doc",
+                    pageId: created.docId,
+                });
+                linkedToParent = true;
+            }
+            catch {
+                // Non-fatal: doc was created, just not linked. Warn below.
+            }
+        }
+        const applyWarnings = [];
+        if (applied.skippedCount > 0) {
+            applyWarnings.push(`${applied.skippedCount} markdown block(s) could not be applied to AFFiNE and were skipped.`);
+        }
+        if (parsed.parentDocId && !linkedToParent) {
+            applyWarnings.push(`Doc created but could not be linked to parent doc "${parsed.parentDocId}". Link it manually.`);
+        }
+        return {
             workspaceId: created.workspaceId,
             docId: created.docId,
             title: created.title,
+            linkedToParent,
             warnings: mergeWarnings(parsedMarkdown.warnings, applyWarnings),
             lossy: parsedMarkdown.lossy || applied.skippedCount > 0,
             stats: {
@@ -2678,18 +3106,67 @@ export function registerDocTools(server, gql, defaults) {
                 appliedBlocks: applied.appendedCount,
                 skippedBlocks: applied.skippedCount,
             },
-        });
+        };
+    };
+    const createDocFromMarkdownHandler = async (parsed) => {
+        return text(await createDocFromMarkdownCore(parsed));
     };
     server.registerTool("create_doc_from_markdown", {
         title: "Create Document From Markdown",
-        description: "Create a new AFFiNE document and import markdown content.",
+        description: "Create a new AFFiNE document and import markdown content. Use parentDocId to automatically embed the new doc into a parent, making it visible in the sidebar instead of being an orphan.",
         inputSchema: {
             workspaceId: WorkspaceId.optional(),
             title: z.string().optional(),
             markdown: MarkdownContent.describe("Markdown content to import"),
             strict: z.boolean().optional(),
+            parentDocId: z.string().optional().describe("If provided, the new doc is automatically embedded into this parent doc as a linked child (visible in sidebar)."),
         },
     }, createDocFromMarkdownHandler);
+    // batch_create_docs: create up to 20 docs in one call
+    const batchCreateDocsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        if (!Array.isArray(parsed.docs) || parsed.docs.length === 0)
+            throw new Error("docs array is required.");
+        if (parsed.docs.length > 20)
+            throw new Error("Maximum 20 docs per batch.");
+        const results = [];
+        for (const item of parsed.docs) {
+            try {
+                const d = await createDocFromMarkdownCore({ workspaceId, title: item.title, markdown: item.markdown });
+                // Link to parent if provided
+                let linkedToParent = false;
+                if (item.parentDocId) {
+                    try {
+                        await appendBlockInternal({ workspaceId, docId: item.parentDocId, type: "embed_linked_doc", pageId: d.docId });
+                        linkedToParent = true;
+                    }
+                    catch {
+                        d.warnings?.push(`Doc created but could not be linked to parent "${item.parentDocId}". Link it manually.`);
+                    }
+                }
+                results.push({ title: d.title, docId: d.docId, linkedToParent, warnings: d.warnings ?? [] });
+            }
+            catch (err) {
+                results.push({ title: item.title, docId: "", linkedToParent: false, warnings: [`Failed: ${err?.message ?? String(err)}`] });
+            }
+        }
+        const failed = results.filter(r => !r.docId).length;
+        return text({ created: results.length - failed, failed, results });
+    };
+    server.registerTool("batch_create_docs", {
+        title: "Batch Create Documents",
+        description: "Create multiple AFFiNE documents in a single call. Each doc can optionally be linked to a parent (parentDocId) to appear in the sidebar. Max 20 docs per batch.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docs: z.array(z.object({
+                title: z.string().describe("Document title."),
+                markdown: z.string().describe("Markdown content."),
+                parentDocId: z.string().optional().describe("Parent doc ID — if provided, the new doc is embedded under this parent in the sidebar."),
+            })).min(1).max(20).describe("Array of docs to create (max 20)."),
+        },
+    }, batchCreateDocsHandler);
     const appendMarkdownHandler = async (parsed) => {
         const workspaceId = parsed.workspaceId || defaults.workspaceId;
         if (!workspaceId) {
@@ -2824,7 +3301,629 @@ export function registerDocTools(server, gql, defaults) {
         description: 'Delete a document and remove from workspace list',
         inputSchema: { workspaceId: z.string().optional(), docId: z.string() },
     }, deleteDocHandler);
-    // ── helpers for database select columns ──
+    // ─── cleanup_orphan_embeds ──────────────────────────────────────────────────
+    const cleanupOrphanEmbedsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const snap = await loadDoc(socket, workspaceId, parsed.docId);
+            if (!snap.missing)
+                throw new Error(`Doc ${parsed.docId} not found.`);
+            const doc = new Y.Doc();
+            Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+            const blocks = doc.getMap("blocks");
+            const orphans = [];
+            for (const [blockId, raw] of blocks) {
+                if (!(raw instanceof Y.Map))
+                    continue;
+                if (raw.get("sys:flavour") !== "affine:embed-linked-doc")
+                    continue;
+                const targetId = raw.get("prop:pageId");
+                if (typeof targetId !== "string" || !targetId) {
+                    orphans.push({ blockId, targetDocId: targetId ?? "" });
+                    continue;
+                }
+                const targetSnap = await loadDoc(socket, workspaceId, targetId);
+                if (!targetSnap.missing)
+                    orphans.push({ blockId, targetDocId: targetId });
+            }
+            if (parsed.dryRun || orphans.length === 0) {
+                return text({ docId: parsed.docId, dryRun: parsed.dryRun ?? false, orphansFound: orphans.length, orphans });
+            }
+            const prevSV = Y.encodeStateVector(doc);
+            for (const { blockId } of orphans) {
+                for (const [, parentRaw] of blocks) {
+                    if (!(parentRaw instanceof Y.Map))
+                        continue;
+                    const children = parentRaw.get("sys:children");
+                    if (!(children instanceof Y.Array))
+                        continue;
+                    const ids = childIdsFrom(children);
+                    const idx = ids.indexOf(blockId);
+                    if (idx !== -1) {
+                        children.delete(idx, 1);
+                        break;
+                    }
+                }
+                blocks.delete(blockId);
+            }
+            const delta = Y.encodeStateAsUpdate(doc, prevSV);
+            await pushDocUpdate(socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            return text({ docId: parsed.docId, dryRun: false, orphansRemoved: orphans.length, orphans });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("cleanup_orphan_embeds", {
+        title: "Cleanup Orphan Embed Links",
+        description: "Remove embed_linked_doc blocks that point to deleted/non-existent docs. Use dryRun=true to preview without making changes.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The doc to clean up orphan embeds from."),
+            dryRun: z.boolean().optional().describe("If true, only report orphans without deleting (default: false)."),
+        },
+    }, cleanupOrphanEmbedsHandler);
+    // ─── find_and_replace ───────────────────────────────────────────────────────
+    const findAndReplaceHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const snap = await loadDoc(socket, workspaceId, parsed.docId);
+            if (!snap.missing)
+                throw new Error(`Doc ${parsed.docId} not found.`);
+            const doc = new Y.Doc();
+            Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+            const blocks = doc.getMap("blocks");
+            let totalMatches = 0;
+            const matchLog = [];
+            const matchAll = parsed.matchAll !== false;
+            for (const [blockId, raw] of blocks) {
+                if (!(raw instanceof Y.Map))
+                    continue;
+                const flavour = raw.get("sys:flavour");
+                for (const [, val] of raw) {
+                    if (!(val instanceof Y.Text))
+                        continue;
+                    const original = val.toString();
+                    if (!original.includes(parsed.search))
+                        continue;
+                    const replaced = matchAll
+                        ? original.split(parsed.search).join(parsed.replace)
+                        : original.replace(parsed.search, parsed.replace);
+                    const count = matchAll ? original.split(parsed.search).length - 1 : 1;
+                    totalMatches += count;
+                    matchLog.push({ blockId, flavour: flavour ?? "unknown", original, replaced });
+                    if (!parsed.dryRun) {
+                        const prevSV = Y.encodeStateVector(doc);
+                        val.delete(0, val.length);
+                        val.insert(0, replaced);
+                        const delta = Y.encodeStateAsUpdate(doc, prevSV);
+                        await pushDocUpdate(socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+                    }
+                }
+            }
+            return text({
+                docId: parsed.docId, search: parsed.search, replace: parsed.replace,
+                dryRun: parsed.dryRun ?? false, totalMatches, blocksAffected: matchLog.length, matches: matchLog,
+            });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("find_and_replace", {
+        title: "Find and Replace in Document",
+        description: "Find and replace text across all Y.Text fields in a document (paragraphs, headings, titles). matchAll defaults to true. Use dryRun=true to preview before applying.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The doc to search in."),
+            search: z.string().min(1).describe("Text to find (must not be empty)."),
+            replace: z.string().describe("Replacement text."),
+            matchAll: z.boolean().optional().describe("Replace all occurrences (default: true)."),
+            dryRun: z.boolean().optional().describe("If true, only report matches without replacing (default: false)."),
+        },
+    }, findAndReplaceHandler);
+    // ─── get_docs_by_tag ────────────────────────────────────────────────────────
+    const getDocsByTagHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (!wsSnap.missing)
+                return text({ tag: parsed.tag, count: 0, docs: [] });
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+            const meta = wsDoc.getMap("meta");
+            const { byId, options } = getWorkspaceTagOptionMaps(meta);
+            const q = parsed.tag.toLowerCase();
+            const matchingTagIds = new Set(options.filter(o => o.value.toLowerCase().includes(q)).map(o => o.id));
+            if (matchingTagIds.size === 0) {
+                return text({
+                    tag: parsed.tag,
+                    count: 0,
+                    docs: [],
+                    availableTags: options.map(o => o.value),
+                });
+            }
+            const pages = getWorkspacePageEntries(meta);
+            const baseUrl = (process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '');
+            const matched = pages
+                .map(p => {
+                const rawTagIds = getStringArray(p.tagsArray);
+                return { p, rawTagIds };
+            })
+                .filter(({ rawTagIds }) => rawTagIds.some(tid => matchingTagIds.has(tid)))
+                .map(({ p, rawTagIds }) => ({
+                docId: p.id,
+                title: p.title ?? "Untitled",
+                tags: resolveTagLabels(rawTagIds, byId),
+                url: `${baseUrl}/workspace/${workspaceId}/${p.id}`,
+            }));
+            return text({ tag: parsed.tag, count: matched.length, docs: matched });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("get_docs_by_tag", {
+        title: "Get Documents by Tag",
+        description: "Filter documents by tag name (case-insensitive substring match). Returns matching docs with their full tag list. If no match, also returns availableTags for discoverability.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            tag: z.string().describe("Tag name to filter by (substring match, case-insensitive)."),
+        },
+    }, getDocsByTagHandler);
+    // ─── list_workspace_tree ────────────────────────────────────────────────────
+    const listWorkspaceTreeHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const maxDepth = parsed.depth ?? 3;
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (!wsSnap.missing)
+                return text({ workspaceId, tree: [] });
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+            const pages = getWorkspacePageEntries(wsDoc.getMap("meta"));
+            const titleById = new Map(pages.map(p => [p.id, p.title ?? "Untitled"]));
+            const childrenOf = new Map();
+            const allChildren = new Set();
+            for (const page of pages) {
+                const snap = await loadDoc(socket, workspaceId, page.id);
+                if (!snap.missing)
+                    continue;
+                const doc = new Y.Doc();
+                Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+                const blocks = doc.getMap("blocks");
+                const kids = [];
+                for (const [, raw] of blocks) {
+                    if (!(raw instanceof Y.Map))
+                        continue;
+                    if (raw.get("sys:flavour") !== "affine:embed-linked-doc")
+                        continue;
+                    const pid = raw.get("prop:pageId");
+                    if (typeof pid === "string" && pid && titleById.has(pid)) {
+                        kids.push(pid);
+                        allChildren.add(pid);
+                    }
+                }
+                if (kids.length)
+                    childrenOf.set(page.id, kids);
+            }
+            const baseUrl = (process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '');
+            const roots = pages.filter(p => !allChildren.has(p.id)).map(p => p.id);
+            const buildNode = (id, depth) => ({
+                docId: id, title: titleById.get(id) ?? "Untitled",
+                url: `${baseUrl}/workspace/${workspaceId}/${id}`,
+                children: depth < maxDepth ? (childrenOf.get(id) ?? []).map(cid => buildNode(cid, depth + 1)) : [],
+            });
+            return text({ workspaceId, totalDocs: pages.length, rootCount: roots.length, tree: roots.map(id => buildNode(id, 0)) });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("list_workspace_tree", {
+        title: "List Workspace Tree",
+        description: "Returns the full document hierarchy as a tree (roots → children → grandchildren). Use depth to limit nesting (default: 3). Note: loads all docs — may be slow on large workspaces.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            depth: z.number().optional().describe("Max nesting depth to return (default: 3)."),
+        },
+    }, listWorkspaceTreeHandler);
+    // ─── get_orphan_docs ────────────────────────────────────────────────────────
+    const getOrphanDocsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (!wsSnap.missing)
+                return text({ orphans: [] });
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+            const pages = getWorkspacePageEntries(wsDoc.getMap("meta"));
+            const titleById = new Map(pages.map(p => [p.id, p.title ?? "Untitled"]));
+            const allChildren = new Set();
+            for (const page of pages) {
+                const snap = await loadDoc(socket, workspaceId, page.id);
+                if (!snap.missing)
+                    continue;
+                const doc = new Y.Doc();
+                Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+                const blocks = doc.getMap("blocks");
+                for (const [, raw] of blocks) {
+                    if (!(raw instanceof Y.Map))
+                        continue;
+                    if (raw.get("sys:flavour") !== "affine:embed-linked-doc")
+                        continue;
+                    const pageId = raw.get("prop:pageId");
+                    if (typeof pageId === "string" && pageId)
+                        allChildren.add(pageId);
+                }
+            }
+            const baseUrl = (process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, "")).replace(/\/$/, "");
+            const orphans = pages
+                .filter(p => !allChildren.has(p.id))
+                .map(p => ({
+                docId: p.id,
+                title: titleById.get(p.id) ?? "Untitled",
+                url: `${baseUrl}/workspace/${workspaceId}/${p.id}`,
+            }));
+            return text({ count: orphans.length, orphans });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("get_orphan_docs", {
+        title: "Get Orphan Documents",
+        description: "Find all documents that have no parent (not linked from any other doc via embed_linked_doc). Useful for workspace hygiene. Note: scans all docs — O(n).",
+        inputSchema: { workspaceId: z.string().optional() },
+    }, getOrphanDocsHandler);
+    const listChildrenHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const titleById = new Map();
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (wsSnap.missing) {
+                const wsDoc = new Y.Doc();
+                Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+                for (const page of getWorkspacePageEntries(wsDoc.getMap("meta"))) {
+                    if (page.title)
+                        titleById.set(page.id, page.title);
+                }
+            }
+            const snap = await loadDoc(socket, workspaceId, parsed.docId);
+            if (!snap.missing)
+                return text({ docId: parsed.docId, children: [] });
+            const doc = new Y.Doc();
+            Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+            const blocks = doc.getMap("blocks");
+            const children = [];
+            for (const [, raw] of blocks) {
+                if (!(raw instanceof Y.Map))
+                    continue;
+                if (raw.get("sys:flavour") !== "affine:embed-linked-doc")
+                    continue;
+                const pageId = raw.get("prop:pageId");
+                if (typeof pageId === "string" && pageId) {
+                    children.push({ docId: pageId, title: titleById.get(pageId) ?? null,
+                        url: `${(process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '')}/workspace/${workspaceId}/${pageId}` });
+                }
+            }
+            return text({ docId: parsed.docId, count: children.length, children });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("list_children", {
+        title: "List Document Children",
+        description: "List the direct children of a document in the sidebar (embed_linked_doc blocks). Returns docId, title, and URL for each child.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The parent doc whose children to list."),
+        },
+    }, listChildrenHandler);
+    // ─── update_doc_title ───────────────────────────────────────────────────────
+    const updateDocTitleHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const newTitle = parsed.title.trim();
+        if (!newTitle)
+            throw new Error("title must not be empty.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (wsSnap.missing) {
+                const wsDoc = new Y.Doc();
+                Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+                const prevSV = Y.encodeStateVector(wsDoc);
+                const pages = wsDoc.getMap("meta").get("pages");
+                if (pages)
+                    pages.forEach((page) => {
+                        if (page instanceof Y.Map && page.get("id") === parsed.docId)
+                            page.set("title", newTitle);
+                    });
+                const delta = Y.encodeStateAsUpdate(wsDoc, prevSV);
+                await pushDocUpdate(socket, workspaceId, workspaceId, Buffer.from(delta).toString("base64"));
+            }
+            const snap = await loadDoc(socket, workspaceId, parsed.docId);
+            if (snap.missing) {
+                const doc = new Y.Doc();
+                Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+                const prevSV = Y.encodeStateVector(doc);
+                const blocks = doc.getMap("blocks");
+                for (const [, raw] of blocks) {
+                    if (!(raw instanceof Y.Map))
+                        continue;
+                    if (raw.get("sys:flavour") === "affine:page") {
+                        const titleText = new Y.Text();
+                        titleText.insert(0, newTitle);
+                        raw.set("prop:title", titleText);
+                        break;
+                    }
+                }
+                const delta = Y.encodeStateAsUpdate(doc, prevSV);
+                await pushDocUpdate(socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            }
+            return text({ updated: true, docId: parsed.docId, title: newTitle });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("update_doc_title", {
+        title: "Update Document Title",
+        description: "Rename a document — updates both the sidebar title (workspace metadata) and the doc's internal page block title.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The doc to rename."),
+            title: z.string().describe("New title."),
+        },
+    }, updateDocTitleHandler);
+    // ─── get_doc_by_title ────────────────────────────────────────────────────────
+    const getDocByTitleHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (!wsSnap.missing)
+                return text({ query: parsed.query, found: false, results: [] });
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+            const q = parsed.query.toLowerCase();
+            const limit = parsed.limit ?? 1;
+            const matches = getWorkspacePageEntries(wsDoc.getMap("meta"))
+                .filter(p => p.title && p.title.toLowerCase().includes(q)).slice(0, limit);
+            if (matches.length === 0)
+                return text({ query: parsed.query, found: false, results: [] });
+            const results = [];
+            for (const match of matches) {
+                const snap = await loadDoc(socket, workspaceId, match.id);
+                if (!snap.missing) {
+                    results.push({ docId: match.id, title: match.title, found: false });
+                    continue;
+                }
+                const doc = new Y.Doc();
+                Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+                const collected = collectDocForMarkdown(doc, new Map());
+                const rendered = renderBlocksToMarkdown({ rootBlockIds: collected.rootBlockIds, blocksById: collected.blocksById });
+                results.push({ docId: match.id, title: match.title, found: true, markdown: rendered.markdown,
+                    url: `${(process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '')}/workspace/${workspaceId}/${match.id}` });
+            }
+            return text({ query: parsed.query, found: results.some(r => r.found), results });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("get_doc_by_title", {
+        title: "Get Document by Title",
+        description: "Find a document by title and return its content as markdown in a single call. Combines search_docs + export_doc_markdown. Returns the first match by default; use limit for multiple.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            query: z.string().describe("Title search query (case-insensitive substring match)."),
+            limit: z.number().optional().describe("Max docs to return with content (default: 1)."),
+        },
+    }, getDocByTitleHandler);
+    // ─── list_backlinks ──────────────────────────────────────────────────────────
+    const listBacklinksHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const wsSnap = await loadDoc(socket, workspaceId, workspaceId);
+            if (!wsSnap.missing)
+                return text({ docId: parsed.docId, count: 0, backlinks: [] });
+            const wsDoc = new Y.Doc();
+            Y.applyUpdate(wsDoc, Buffer.from(wsSnap.missing, "base64"));
+            const pages = getWorkspacePageEntries(wsDoc.getMap("meta"));
+            const titleById = new Map(pages.map(p => [p.id, p.title]));
+            const backlinks = [];
+            for (const page of pages) {
+                if (page.id === parsed.docId)
+                    continue;
+                const snap = await loadDoc(socket, workspaceId, page.id);
+                if (!snap.missing)
+                    continue;
+                const doc = new Y.Doc();
+                Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+                const blocks = doc.getMap("blocks");
+                for (const [, raw] of blocks) {
+                    if (!(raw instanceof Y.Map))
+                        continue;
+                    if (raw.get("sys:flavour") === "affine:embed-linked-doc" && raw.get("prop:pageId") === parsed.docId) {
+                        backlinks.push({ docId: page.id, title: titleById.get(page.id) ?? null,
+                            url: `${(process.env.AFFINE_BASE_URL || endpoint.replace(/\/graphql\/?$/, '')).replace(/\/$/, '')}/workspace/${workspaceId}/${page.id}` });
+                        break;
+                    }
+                }
+            }
+            return text({ docId: parsed.docId, count: backlinks.length, backlinks });
+        }
+        finally {
+            socket.disconnect();
+        }
+    };
+    server.registerTool("list_backlinks", {
+        title: "List Document Backlinks",
+        description: "Find all documents that embed-link to a given doc (its parents/references in the sidebar). Scans all docs — may be slow on large workspaces.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The doc to find backlinks for."),
+        },
+    }, listBacklinksHandler);
+    // ─── duplicate_doc ───────────────────────────────────────────────────────────
+    const duplicateDocHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const snap = await loadDoc(socket, workspaceId, parsed.docId);
+            if (!snap.missing)
+                throw new Error(`Doc ${parsed.docId} not found.`);
+            const doc = new Y.Doc();
+            Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+            const collected = collectDocForMarkdown(doc, new Map());
+            const rendered = renderBlocksToMarkdown({ rootBlockIds: collected.rootBlockIds, blocksById: collected.blocksById });
+            const newTitle = (parsed.title ?? `${collected.title || "Untitled"} (copy)`).trim();
+            socket.disconnect();
+            const r = await createDocFromMarkdownHandler({ workspaceId, title: newTitle, markdown: rendered.markdown });
+            const created = JSON.parse(r.content[0].text);
+            let linkedToParent = false;
+            if (parsed.parentDocId && created.docId) {
+                try {
+                    await appendBlockInternal({ workspaceId, docId: parsed.parentDocId, type: "embed_linked_doc", pageId: created.docId });
+                    linkedToParent = true;
+                }
+                catch { /* non-fatal */ }
+            }
+            return text({ sourceDocId: parsed.docId, docId: created.docId, title: created.title, linkedToParent, warnings: created.warnings ?? [] });
+        }
+        catch (err) {
+            try {
+                socket.disconnect();
+            }
+            catch { /* already disconnected */ }
+            throw err;
+        }
+    };
+    server.registerTool("duplicate_doc", {
+        title: "Duplicate Document",
+        description: "Clone a document by copying its markdown content into a new doc. Optionally set a new title and/or parentDocId to place it in the sidebar.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            docId: z.string().describe("The source doc to duplicate."),
+            title: z.string().optional().describe("Title for the new doc. Defaults to '<original title> (copy)'."),
+            parentDocId: z.string().optional().describe("Parent doc to link the new doc under in the sidebar."),
+        },
+    }, duplicateDocHandler);
+    // ─── create_doc_from_template ───────────────────────────────────────────────
+    const createDocFromTemplateHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required.");
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        try {
+            await joinWorkspace(socket, workspaceId);
+            const snap = await loadDoc(socket, workspaceId, parsed.templateDocId);
+            if (!snap.missing)
+                throw new Error(`Template doc ${parsed.templateDocId} not found.`);
+            const doc = new Y.Doc();
+            Y.applyUpdate(doc, Buffer.from(snap.missing, "base64"));
+            const collected = collectDocForMarkdown(doc, new Map());
+            const rendered = renderBlocksToMarkdown({ rootBlockIds: collected.rootBlockIds, blocksById: collected.blocksById });
+            let markdown = rendered.markdown;
+            const vars = parsed.variables ?? {};
+            for (const [key, value] of Object.entries(vars)) {
+                const pattern = new RegExp(`\\{\\{\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}}`, "g");
+                markdown = markdown.replace(pattern, value);
+            }
+            const unfilled = [...markdown.matchAll(/\{\{\s*[\w.-]+\s*\}\}/g)].map(match => match[0]);
+            socket.disconnect();
+            const result = await createDocFromMarkdownHandler({ workspaceId, title: parsed.title, markdown });
+            const created = JSON.parse(result.content[0].text);
+            let linkedToParent = false;
+            if (parsed.parentDocId && created.docId) {
+                try {
+                    await appendBlockInternal({ workspaceId, docId: parsed.parentDocId, type: "embed_linked_doc", pageId: created.docId });
+                    linkedToParent = true;
+                }
+                catch { /* non-fatal */ }
+            }
+            return text({ ...created, sourceTemplateDocId: parsed.templateDocId, linkedToParent, unfilledVariables: unfilled });
+        }
+        catch (err) {
+            try {
+                socket.disconnect();
+            }
+            catch { /* already disconnected */ }
+            throw err;
+        }
+    };
+    server.registerTool("create_doc_from_template", {
+        title: "Create Document from Template",
+        description: "Clone a template doc and substitute {{variable}} placeholders. Returns a warning for any unfilled variables. Optionally link to a parent doc in the sidebar.",
+        inputSchema: {
+            workspaceId: z.string().optional(),
+            templateDocId: z.string().describe("The template doc to clone from."),
+            title: z.string().describe("Title for the new doc."),
+            variables: z.record(z.string(), z.string()).optional().describe("Key-value map of {{variable}} substitutions."),
+            parentDocId: z.string().optional().describe("Parent doc to link the new doc under in the sidebar."),
+        },
+    }, createDocFromTemplateHandler);
     /** Read column definitions including select options from a database block */
     function readColumnDefs(dbBlock) {
         const columnsRaw = dbBlock.get("prop:columns");
@@ -2862,17 +3961,158 @@ export function registerDocTools(server, gql, defaults) {
         });
         return defs;
     }
-    const SELECT_COLORS = [
-        "var(--affine-tag-blue)", "var(--affine-tag-green)", "var(--affine-tag-red)",
-        "var(--affine-tag-orange)", "var(--affine-tag-purple)", "var(--affine-tag-yellow)",
-        "var(--affine-tag-teal)", "var(--affine-tag-pink)", "var(--affine-tag-gray)",
-    ];
+    function readDatabaseViewDefs(dbBlock, lookup) {
+        const viewsRaw = dbBlock.get("prop:views");
+        const views = [];
+        if (!(viewsRaw instanceof Y.Array)) {
+            return views;
+        }
+        viewsRaw.forEach((view) => {
+            const id = view instanceof Y.Map ? view.get("id") : view?.id;
+            if (!id) {
+                return;
+            }
+            const columnsRaw = view instanceof Y.Map ? view.get("columns") : view?.columns;
+            const headerRaw = view instanceof Y.Map ? view.get("header") : view?.header;
+            const groupByRaw = view instanceof Y.Map ? view.get("groupBy") : view?.groupBy;
+            const columns = databaseArrayValues(columnsRaw)
+                .map((entry) => {
+                const columnId = entry instanceof Y.Map ? entry.get("id") : entry?.id;
+                if (!columnId || typeof columnId !== "string") {
+                    return null;
+                }
+                const columnDef = lookup.colById.get(columnId) || null;
+                const hidden = entry instanceof Y.Map ? entry.get("hide") : entry?.hide;
+                const width = entry instanceof Y.Map ? entry.get("width") : entry?.width;
+                return {
+                    id: columnId,
+                    name: columnDef?.name || null,
+                    hidden: hidden === true,
+                    width: typeof width === "number" ? width : null,
+                };
+            })
+                .filter((entry) => entry !== null);
+            views.push({
+                id: String(id),
+                name: String((view instanceof Y.Map ? view.get("name") : view?.name) || ""),
+                mode: String((view instanceof Y.Map ? view.get("mode") : view?.mode) || ""),
+                columns,
+                columnIds: columns.map(column => column.id),
+                groupBy: groupByRaw
+                    ? {
+                        columnId: typeof groupByRaw?.columnId === "string" ? groupByRaw.columnId : null,
+                        name: typeof groupByRaw?.name === "string" ? groupByRaw.name : null,
+                        type: typeof groupByRaw?.type === "string" ? groupByRaw.type : null,
+                    }
+                    : null,
+                header: {
+                    titleColumn: typeof headerRaw?.titleColumn === "string" ? headerRaw.titleColumn : null,
+                    iconColumn: typeof headerRaw?.iconColumn === "string" ? headerRaw.iconColumn : null,
+                },
+            });
+        });
+        return views;
+    }
+    function isTitleAliasKey(value) {
+        return value.trim().toLowerCase() === "title";
+    }
+    function buildDatabaseColumnLookup(columnDefs) {
+        const colById = new Map();
+        const colByName = new Map();
+        const colByNameLower = new Map();
+        let titleCol = null;
+        for (const col of columnDefs) {
+            colById.set(col.id, col);
+            if (col.name) {
+                colByName.set(col.name, col);
+                colByNameLower.set(col.name.trim().toLowerCase(), col);
+            }
+            if (!titleCol && col.type === "title") {
+                titleCol = col;
+            }
+        }
+        return { columnDefs, colById, colByName, colByNameLower, titleCol };
+    }
+    function findDatabaseColumn(key, lookup) {
+        return lookup.colByName.get(key)
+            || lookup.colById.get(key)
+            || lookup.colByNameLower.get(key.trim().toLowerCase())
+            || null;
+    }
+    function availableDatabaseColumns(lookup) {
+        return ["title", ...lookup.columnDefs.map(col => col.name || col.id)].join(", ");
+    }
+    function getDatabaseRowIds(dbBlock) {
+        return childIdsFrom(dbBlock.get("sys:children"));
+    }
+    function readDatabaseRowTitle(rowBlock) {
+        return asText(rowBlock.get("prop:text"));
+    }
+    function resolveDatabaseTitleValue(cells, lookup) {
+        if (lookup.titleCol) {
+            const value = cells[lookup.titleCol.name] ?? cells[lookup.titleCol.id];
+            if (value !== undefined) {
+                return String(value ?? "");
+            }
+        }
+        for (const [key, value] of Object.entries(cells)) {
+            if (isTitleAliasKey(key)) {
+                return String(value ?? "");
+            }
+        }
+        const namedTitleColumn = lookup.colByNameLower.get("title");
+        if (namedTitleColumn) {
+            const value = cells[namedTitleColumn.name] ?? cells[namedTitleColumn.id];
+            if (value !== undefined) {
+                return String(value ?? "");
+            }
+        }
+        return "";
+    }
+    function ensureDatabaseRowCells(cellsMap, rowBlockId) {
+        const existing = cellsMap.get(rowBlockId);
+        if (existing instanceof Y.Map) {
+            return existing;
+        }
+        const rowCells = new Y.Map();
+        cellsMap.set(rowBlockId, rowCells);
+        return rowCells;
+    }
+    function getDatabaseRowBlock(blocks, databaseBlockId, rowBlockId) {
+        const rowBlock = findBlockById(blocks, rowBlockId);
+        if (!rowBlock) {
+            throw new Error(`Row block '${rowBlockId}' not found`);
+        }
+        if (rowBlock.get("sys:parent") !== databaseBlockId) {
+            throw new Error(`Row block '${rowBlockId}' does not belong to database '${databaseBlockId}'`);
+        }
+        if (rowBlock.get("sys:flavour") !== "affine:paragraph") {
+            throw new Error(`Row block '${rowBlockId}' is not a database row paragraph`);
+        }
+        return rowBlock;
+    }
+    function databaseArrayValues(value) {
+        if (value instanceof Y.Array) {
+            const entries = [];
+            value.forEach(entry => {
+                entries.push(entry);
+            });
+            return entries;
+        }
+        if (Array.isArray(value)) {
+            return value;
+        }
+        return [];
+    }
     /** Find or create a select option for a column, mutating the column's data in place */
-    function resolveSelectOptionId(col, valueText) {
+    function resolveSelectOptionId(col, valueText, createOption = true) {
         // Try exact match first
         const existing = col.options.find(o => o.value === valueText);
         if (existing)
             return existing.id;
+        if (!createOption) {
+            throw new Error(`Column "${col.name}": option "${valueText}" not found`);
+        }
         // Create new option
         const newId = generateId();
         const colorIdx = col.options.length % SELECT_COLORS.length;
@@ -2899,43 +4139,172 @@ export function registerDocTools(server, gql, defaults) {
         }
         return newId;
     }
+    function decodeDatabaseCellValue(col, cellEntry) {
+        const rawValue = cellEntry instanceof Y.Map ? cellEntry.get("value") : cellEntry?.value;
+        const base = {
+            columnId: col.id,
+            type: col.type,
+        };
+        switch (col.type) {
+            case "rich-text":
+            case "title":
+                return { ...base, value: richTextValueToString(rawValue) || null };
+            case "select": {
+                const optionId = asStringOrNull(rawValue);
+                const option = col.options.find(entry => entry.id === optionId) || null;
+                return {
+                    ...base,
+                    value: option?.value ?? optionId ?? null,
+                    optionId: optionId ?? null,
+                };
+            }
+            case "multi-select": {
+                const optionIds = databaseArrayValues(rawValue).map(entry => String(entry));
+                const values = optionIds.map(optionId => col.options.find(entry => entry.id === optionId)?.value ?? optionId);
+                return {
+                    ...base,
+                    value: values,
+                    optionIds,
+                };
+            }
+            case "number": {
+                const numericValue = typeof rawValue === "number" ? rawValue : Number(rawValue);
+                return {
+                    ...base,
+                    value: Number.isFinite(numericValue) ? numericValue : null,
+                };
+            }
+            case "checkbox":
+                return { ...base, value: typeof rawValue === "boolean" ? rawValue : !!rawValue };
+            case "date": {
+                const numericValue = typeof rawValue === "number" ? rawValue : Number(rawValue);
+                return {
+                    ...base,
+                    value: Number.isFinite(numericValue) ? numericValue : null,
+                };
+            }
+            case "link":
+                return { ...base, value: rawValue == null ? null : String(rawValue) };
+            default:
+                return {
+                    ...base,
+                    value: typeof rawValue === "string" || rawValue instanceof Y.Text || Array.isArray(rawValue)
+                        ? richTextValueToString(rawValue)
+                        : rawValue ?? null,
+                };
+        }
+    }
+    function writeDatabaseCellValue(rowCells, col, value, createOption) {
+        const cellValue = new Y.Map();
+        cellValue.set("columnId", col.id);
+        switch (col.type) {
+            case "rich-text":
+            case "title":
+                cellValue.set("value", makeText(String(value ?? "")));
+                break;
+            case "number": {
+                const num = Number(value);
+                if (Number.isNaN(num)) {
+                    throw new Error(`Column "${col.name}": expected a number, got ${JSON.stringify(value)}`);
+                }
+                cellValue.set("value", num);
+                break;
+            }
+            case "checkbox": {
+                let bool;
+                if (typeof value === "boolean") {
+                    bool = value;
+                }
+                else if (typeof value === "string") {
+                    const lower = value.toLowerCase().trim();
+                    bool = lower === "true" || lower === "1" || lower === "yes";
+                }
+                else {
+                    bool = !!value;
+                }
+                cellValue.set("value", bool);
+                break;
+            }
+            case "select":
+                cellValue.set("value", resolveSelectOptionId(col, String(value ?? ""), createOption));
+                break;
+            case "multi-select": {
+                const labels = Array.isArray(value) ? value.map(String) : [String(value ?? "")];
+                const optionIds = new Y.Array();
+                optionIds.push(labels.map(label => resolveSelectOptionId(col, label, createOption)));
+                cellValue.set("value", optionIds);
+                break;
+            }
+            case "date": {
+                const numericValue = typeof value === "number"
+                    ? value
+                    : Number.isNaN(Number(value)) ? Date.parse(String(value)) : Number(value);
+                if (!Number.isFinite(numericValue)) {
+                    throw new Error(`Column "${col.name}": expected a timestamp-compatible value, got ${JSON.stringify(value)}`);
+                }
+                cellValue.set("value", numericValue);
+                break;
+            }
+            case "link":
+                cellValue.set("value", String(value ?? ""));
+                break;
+            default:
+                if (typeof value === "string") {
+                    cellValue.set("value", makeText(value));
+                }
+                else {
+                    cellValue.set("value", value);
+                }
+        }
+        rowCells.set(col.id, cellValue);
+    }
+    async function loadDatabaseDocContext(workspaceId, docId, databaseBlockId) {
+        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        await joinWorkspace(socket, workspaceId);
+        const doc = new Y.Doc();
+        const snapshot = await loadDoc(socket, workspaceId, docId);
+        if (!snapshot.missing) {
+            socket.disconnect();
+            throw new Error("Document not found");
+        }
+        Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
+        const prevSV = Y.encodeStateVector(doc);
+        const blocks = doc.getMap("blocks");
+        const dbBlock = findBlockById(blocks, databaseBlockId);
+        if (!dbBlock) {
+            socket.disconnect();
+            throw new Error(`Database block '${databaseBlockId}' not found`);
+        }
+        const dbFlavour = dbBlock.get("sys:flavour");
+        if (dbFlavour !== "affine:database") {
+            socket.disconnect();
+            throw new Error(`Block '${databaseBlockId}' is not a database (flavour: ${dbFlavour})`);
+        }
+        const cellsMap = dbBlock.get("prop:cells");
+        if (!(cellsMap instanceof Y.Map)) {
+            socket.disconnect();
+            throw new Error("Database block has no cells map");
+        }
+        const lookup = buildDatabaseColumnLookup(readColumnDefs(dbBlock));
+        return {
+            socket,
+            doc,
+            prevSV,
+            blocks,
+            dbBlock,
+            cellsMap,
+            ...lookup,
+        };
+    }
     // ADD DATABASE ROW
     const addDatabaseRowHandler = async (parsed) => {
         const workspaceId = parsed.workspaceId || defaults.workspaceId;
         if (!workspaceId)
             throw new Error("workspaceId is required");
-        const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
-        const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
-        const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
         try {
-            await joinWorkspace(socket, workspaceId);
-            const doc = new Y.Doc();
-            const snapshot = await loadDoc(socket, workspaceId, parsed.docId);
-            if (!snapshot.missing)
-                throw new Error("Document not found");
-            Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
-            const prevSV = Y.encodeStateVector(doc);
-            const blocks = doc.getMap("blocks");
-            // Find the database block
-            const dbBlock = findBlockById(blocks, parsed.databaseBlockId);
-            if (!dbBlock)
-                throw new Error(`Database block '${parsed.databaseBlockId}' not found`);
-            const dbFlavour = dbBlock.get("sys:flavour");
-            if (dbFlavour !== "affine:database") {
-                throw new Error(`Block '${parsed.databaseBlockId}' is not a database (flavour: ${dbFlavour})`);
-            }
-            // Read column definitions with select options
-            const columnDefs = readColumnDefs(dbBlock);
-            // Build lookups
-            const colByName = new Map();
-            const colById = new Map();
-            for (const col of columnDefs) {
-                if (col.name)
-                    colByName.set(col.name, col);
-                colById.set(col.id, col);
-            }
-            // Identify the title column (first column, or type === "title")
-            const titleCol = columnDefs.find(c => c.type === "title") || null;
             // Create a new paragraph block as the row child of the database
             const rowBlockId = generateId();
             const rowBlock = new Y.Map();
@@ -2943,104 +4312,26 @@ export function registerDocTools(server, gql, defaults) {
             rowBlock.set("sys:parent", parsed.databaseBlockId);
             rowBlock.set("sys:children", new Y.Array());
             rowBlock.set("prop:type", "text");
-            // Title column value goes on the paragraph block's text
-            const titleValue = titleCol ? parsed.cells[titleCol.name] ?? parsed.cells[titleCol.id] ?? "" : "";
+            const titleValue = resolveDatabaseTitleValue(parsed.cells, ctx);
             rowBlock.set("prop:text", makeText(String(titleValue)));
-            blocks.set(rowBlockId, rowBlock);
+            ctx.blocks.set(rowBlockId, rowBlock);
             // Add row block to database's children
-            const dbChildren = ensureChildrenArray(dbBlock);
+            const dbChildren = ensureChildrenArray(ctx.dbBlock);
             dbChildren.push([rowBlockId]);
-            // Populate cells map on the database block
-            const cellsMap = dbBlock.get("prop:cells");
-            if (!(cellsMap instanceof Y.Map)) {
-                throw new Error("Database block has no cells map");
-            }
             // Create row cell map
-            const rowCells = new Y.Map();
+            const rowCells = ensureDatabaseRowCells(ctx.cellsMap, rowBlockId);
             for (const [key, value] of Object.entries(parsed.cells)) {
-                // Resolve column: try by name first, then by ID
-                const col = colByName.get(key) || colById.get(key);
+                const col = findDatabaseColumn(key, ctx);
                 if (!col) {
-                    throw new Error(`Column '${key}' not found. Available columns: ${columnDefs.map(c => c.name || c.id).join(", ")}`);
-                }
-                // Skip the title column — already stored on the paragraph block
-                if (titleCol && col.id === titleCol.id)
-                    continue;
-                // Create cell value based on column type
-                const cellValue = new Y.Map();
-                cellValue.set("columnId", col.id);
-                switch (col.type) {
-                    case "rich-text": {
-                        const yText = makeText(String(value ?? ""));
-                        cellValue.set("value", yText);
-                        break;
-                    }
-                    case "title": {
-                        // Handled above on the paragraph block; skip
+                    if (isTitleAliasKey(key)) {
                         continue;
                     }
-                    case "number": {
-                        const num = Number(value);
-                        if (Number.isNaN(num)) {
-                            throw new Error(`Column "${col.name}": expected a number, got ${JSON.stringify(value)}`);
-                        }
-                        cellValue.set("value", num);
-                        break;
-                    }
-                    case "checkbox": {
-                        let bool;
-                        if (typeof value === "boolean") {
-                            bool = value;
-                        }
-                        else if (typeof value === "string") {
-                            const lower = value.toLowerCase().trim();
-                            bool = lower === "true" || lower === "1" || lower === "yes";
-                        }
-                        else {
-                            bool = !!value;
-                        }
-                        cellValue.set("value", bool);
-                        break;
-                    }
-                    case "select": {
-                        // Resolve option ID by label text; auto-create if needed
-                        const optionId = resolveSelectOptionId(col, String(value ?? ""));
-                        cellValue.set("value", optionId);
-                        break;
-                    }
-                    case "multi-select": {
-                        const labels = Array.isArray(value) ? value.map(String) : [String(value ?? "")];
-                        const ids = labels.map(lbl => resolveSelectOptionId(col, lbl));
-                        cellValue.set("value", ids);
-                        break;
-                    }
-                    case "date": {
-                        const ts = Number(value);
-                        if (Number.isNaN(ts)) {
-                            throw new Error(`Column "${col.name}": expected a timestamp number, got ${JSON.stringify(value)}`);
-                        }
-                        cellValue.set("value", ts);
-                        break;
-                    }
-                    case "link": {
-                        cellValue.set("value", String(value ?? ""));
-                        break;
-                    }
-                    default: {
-                        // Fallback: store as rich-text
-                        if (typeof value === "string") {
-                            cellValue.set("value", makeText(value));
-                        }
-                        else {
-                            cellValue.set("value", value);
-                        }
-                    }
+                    throw new Error(`Column '${key}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
                 }
-                rowCells.set(col.id, cellValue);
+                writeDatabaseCellValue(rowCells, col, value, true);
             }
-            cellsMap.set(rowBlockId, rowCells);
-            const delta = Y.encodeStateAsUpdate(doc, prevSV);
-            await pushDocUpdate(socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
+            await pushDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
             return text({
                 added: true,
                 rowBlockId,
@@ -3049,7 +4340,7 @@ export function registerDocTools(server, gql, defaults) {
             });
         }
         finally {
-            socket.disconnect();
+            ctx.socket.disconnect();
         }
     };
     server.registerTool("add_database_row", {
@@ -3062,6 +4353,239 @@ export function registerDocTools(server, gql, defaults) {
             cells: z.record(z.unknown()).describe("Map of column name (or column ID) to cell value. For select columns, pass the display label (option auto-created if new)."),
         },
     }, addDatabaseRowHandler);
+    const deleteDatabaseRowHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required");
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+        try {
+            const rowBlock = getDatabaseRowBlock(ctx.blocks, parsed.databaseBlockId, parsed.rowBlockId);
+            const descendantBlockIds = collectDescendantBlockIds(ctx.blocks, [parsed.rowBlockId, ...childIdsFrom(rowBlock.get("sys:children"))]);
+            const dbChildren = ensureChildrenArray(ctx.dbBlock);
+            const rowIndex = indexOfChild(dbChildren, parsed.rowBlockId);
+            if (rowIndex < 0) {
+                throw new Error(`Row block '${parsed.rowBlockId}' is not present in database '${parsed.databaseBlockId}' children`);
+            }
+            dbChildren.delete(rowIndex, 1);
+            ctx.cellsMap.delete(parsed.rowBlockId);
+            for (const blockId of descendantBlockIds) {
+                ctx.blocks.delete(blockId);
+            }
+            const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
+            await pushDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            return text({
+                deleted: true,
+                rowBlockId: parsed.rowBlockId,
+                databaseBlockId: parsed.databaseBlockId,
+            });
+        }
+        finally {
+            ctx.socket.disconnect();
+        }
+    };
+    server.registerTool("delete_database_row", {
+        title: "Delete Database Row",
+        description: "Delete a row from an AFFiNE database block.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+            docId: DocId.describe("Document ID containing the database"),
+            databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+            rowBlockId: z.string().min(1).describe("Row paragraph block ID to delete"),
+        },
+    }, deleteDatabaseRowHandler);
+    const readDatabaseCellsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required");
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+        try {
+            const requestedRows = parsed.rowBlockIds?.length
+                ? parsed.rowBlockIds
+                : getDatabaseRowIds(ctx.dbBlock);
+            const requestedColumns = parsed.columns?.length
+                ? parsed.columns.map(columnKey => {
+                    const col = findDatabaseColumn(columnKey, ctx);
+                    if (!col) {
+                        throw new Error(`Column '${columnKey}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
+                    }
+                    return col;
+                })
+                : ctx.columnDefs;
+            const requestedColumnIds = new Set(requestedColumns.map(col => col.id));
+            const rows = requestedRows.map(rowBlockId => {
+                const rowBlock = getDatabaseRowBlock(ctx.blocks, parsed.databaseBlockId, rowBlockId);
+                const title = readDatabaseRowTitle(rowBlock) || null;
+                const rowCells = ctx.cellsMap.get(rowBlockId);
+                const cells = {};
+                if (rowCells instanceof Y.Map) {
+                    for (const col of ctx.columnDefs) {
+                        if (ctx.titleCol && col.id === ctx.titleCol.id) {
+                            continue;
+                        }
+                        if (!requestedColumnIds.has(col.id)) {
+                            continue;
+                        }
+                        const cellEntry = rowCells.get(col.id);
+                        if (cellEntry === undefined) {
+                            continue;
+                        }
+                        cells[col.name || col.id] = decodeDatabaseCellValue(col, cellEntry);
+                    }
+                }
+                return {
+                    rowBlockId,
+                    title,
+                    cells,
+                };
+            });
+            return text({ rows });
+        }
+        finally {
+            ctx.socket.disconnect();
+        }
+    };
+    server.registerTool("read_database_cells", {
+        title: "Read Database Cells",
+        description: "Read row titles and database cell values from an AFFiNE database block.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+            docId: DocId.describe("Document ID containing the database"),
+            databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+            rowBlockIds: z.array(z.string().min(1)).optional().describe("Optional row block ID filter. Omit to return all rows."),
+            columns: z.array(z.string().min(1)).optional().describe("Optional column name or ID filter."),
+        },
+    }, readDatabaseCellsHandler);
+    const readDatabaseColumnsHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required");
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+        try {
+            const columns = ctx.columnDefs.map(col => ({
+                id: col.id,
+                name: col.name || null,
+                type: col.type,
+                options: col.options,
+            }));
+            return text({
+                databaseBlockId: parsed.databaseBlockId,
+                title: richTextValueToString(ctx.dbBlock.get("prop:title")) || null,
+                rowCount: getDatabaseRowIds(ctx.dbBlock).length,
+                columnCount: columns.length,
+                titleColumnId: ctx.titleCol?.id || null,
+                columns,
+                views: readDatabaseViewDefs(ctx.dbBlock, ctx),
+            });
+        }
+        finally {
+            ctx.socket.disconnect();
+        }
+    };
+    server.registerTool("read_database_columns", {
+        title: "Read Database Columns",
+        description: "Read schema metadata for an AFFiNE database block, including columns, select options, and view column mappings. Useful for empty databases before any rows exist.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+            docId: DocId.describe("Document ID containing the database"),
+            databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+        },
+    }, readDatabaseColumnsHandler);
+    const updateDatabaseCellHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required");
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+        try {
+            const rowBlock = getDatabaseRowBlock(ctx.blocks, parsed.databaseBlockId, parsed.rowBlockId);
+            const rowCells = ensureDatabaseRowCells(ctx.cellsMap, parsed.rowBlockId);
+            const col = findDatabaseColumn(parsed.column, ctx);
+            if (!col) {
+                if (!isTitleAliasKey(parsed.column)) {
+                    throw new Error(`Column '${parsed.column}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
+                }
+            }
+            else {
+                writeDatabaseCellValue(rowCells, col, parsed.value, parsed.createOption ?? true);
+            }
+            if (isTitleAliasKey(parsed.column) || (col && (col.type === "title" || isTitleAliasKey(col.name)))) {
+                rowBlock.set("prop:text", makeText(String(parsed.value ?? "")));
+            }
+            const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
+            await pushDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            return text({
+                updated: true,
+                rowBlockId: parsed.rowBlockId,
+                column: parsed.column,
+                value: parsed.value ?? null,
+            });
+        }
+        finally {
+            ctx.socket.disconnect();
+        }
+    };
+    server.registerTool("update_database_cell", {
+        title: "Update Database Cell",
+        description: "Update a single cell on an existing AFFiNE database row. Use `title` to update the row title shown in Kanban card headers.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+            docId: DocId.describe("Document ID containing the database"),
+            databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+            rowBlockId: z.string().min(1).describe("Row paragraph block ID"),
+            column: z.string().min(1).describe("Column name or ID. Use `title` for the built-in row title."),
+            value: z.unknown().describe("New cell value"),
+            createOption: z.boolean().optional().describe("For select and multi-select columns, create the option label if it does not exist (default true)"),
+        },
+    }, updateDatabaseCellHandler);
+    const updateDatabaseRowHandler = async (parsed) => {
+        const workspaceId = parsed.workspaceId || defaults.workspaceId;
+        if (!workspaceId)
+            throw new Error("workspaceId is required");
+        const ctx = await loadDatabaseDocContext(workspaceId, parsed.docId, parsed.databaseBlockId);
+        try {
+            const rowBlock = getDatabaseRowBlock(ctx.blocks, parsed.databaseBlockId, parsed.rowBlockId);
+            const rowCells = ensureDatabaseRowCells(ctx.cellsMap, parsed.rowBlockId);
+            let titleValue = null;
+            for (const [key, value] of Object.entries(parsed.cells)) {
+                const col = findDatabaseColumn(key, ctx);
+                if (!col) {
+                    if (isTitleAliasKey(key)) {
+                        titleValue = String(value ?? "");
+                        continue;
+                    }
+                    throw new Error(`Column '${key}' not found. Available columns: ${availableDatabaseColumns(ctx)}`);
+                }
+                writeDatabaseCellValue(rowCells, col, value, parsed.createOption ?? true);
+                if (col.type === "title" || isTitleAliasKey(col.name)) {
+                    titleValue = String(value ?? "");
+                }
+            }
+            if (titleValue !== null) {
+                rowBlock.set("prop:text", makeText(titleValue));
+            }
+            const delta = Y.encodeStateAsUpdate(ctx.doc, ctx.prevSV);
+            await pushDocUpdate(ctx.socket, workspaceId, parsed.docId, Buffer.from(delta).toString("base64"));
+            return text({
+                updated: true,
+                rowBlockId: parsed.rowBlockId,
+                cellCount: Object.keys(parsed.cells).length,
+            });
+        }
+        finally {
+            ctx.socket.disconnect();
+        }
+    };
+    server.registerTool("update_database_row", {
+        title: "Update Database Row",
+        description: "Batch update multiple cells on an existing AFFiNE database row. Include `title` in the cells map to update the Kanban row title.",
+        inputSchema: {
+            workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+            docId: DocId.describe("Document ID containing the database"),
+            databaseBlockId: z.string().min(1).describe("Block ID of the affine:database block"),
+            rowBlockId: z.string().min(1).describe("Row paragraph block ID"),
+            cells: z.record(z.unknown()).describe("Map of column name (or column ID) to new cell value. Use `title` for the built-in row title."),
+            createOption: z.boolean().optional().describe("For select and multi-select columns, create the option label if it does not exist (default true)"),
+        },
+    }, updateDatabaseRowHandler);
     // ADD DATABASE COLUMN
     const addDatabaseColumnHandler = async (parsed) => {
         const workspaceId = parsed.workspaceId || defaults.workspaceId;

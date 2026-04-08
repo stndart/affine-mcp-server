@@ -8,6 +8,12 @@ function formatQuote(text) {
     const lines = text.split("\n");
     return lines.map(line => `> ${line}`);
 }
+function formatCallout(lines) {
+    return [
+        "> [!NOTE]",
+        ...lines.map(line => line.length > 0 ? `> ${line}` : ">"),
+    ];
+}
 function escapePipe(value) {
     return value.replace(/\|/g, "\\|");
 }
@@ -135,6 +141,25 @@ function renderBlock(blockId, listDepth, state) {
             }
             return {
                 lines: renderTable(block.tableData),
+                isList: false,
+            };
+        }
+        case "affine:callout": {
+            const contentLines = [];
+            for (const childId of children) {
+                const child = renderBlock(childId, listDepth, state);
+                if (child.lines.length > 0) {
+                    if (contentLines.length > 0 && !child.isList) {
+                        contentLines.push("");
+                    }
+                    contentLines.push(...child.lines);
+                }
+            }
+            if (contentLines.length === 0 && text.length > 0) {
+                contentLines.push(text);
+            }
+            return {
+                lines: formatCallout(contentLines),
                 isList: false,
             };
         }

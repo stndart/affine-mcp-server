@@ -2992,7 +2992,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     getDocHandler as any
   );
 
-  const readDocHandler = async (parsed: { workspaceId?: string; docId: string; includeMarkdown?: boolean }) => {
+  const readDocHandler = async (parsed: { workspaceId?: string; docId: string; includeMarkdown?: boolean; includeDebug?: boolean }) => {
     const workspaceId = parsed.workspaceId || defaults.workspaceId;
     if (!workspaceId) {
       throw new Error("workspaceId is required. Provide it as a parameter or set AFFINE_WORKSPACE_ID in environment.");
@@ -3157,6 +3157,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         workspaceId: WorkspaceId.optional(),
         docId: DocId,
         includeMarkdown: z.boolean().optional().describe("If true, includes rendered markdown in the response. Equivalent to also calling export_doc_markdown."),
+        includeDebug: z.boolean().optional().describe("If true, includes debug information like raw delta data for text blocks."),
       },
     },
     readDocHandler as any
