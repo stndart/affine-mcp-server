@@ -1,5 +1,16 @@
 export type MarkdownListStyle = "bulleted" | "numbered" | "todo";
 
+export type TextDelta = {
+  insert: string;
+  attributes?: {
+    bold?: boolean;
+    italic?: boolean;
+    strike?: boolean;
+    code?: boolean;
+    link?: string;
+  };
+};
+
 export type MarkdownOperation =
   | {
       type: "heading";
@@ -15,10 +26,15 @@ export type MarkdownOperation =
       text: string;
     }
   | {
+      type: "callout";
+      text: string;
+    }
+  | {
       type: "list";
       text: string;
       style: MarkdownListStyle;
       checked?: boolean;
+      deltas?: TextDelta[];
     }
   | {
       type: "code";
@@ -33,6 +49,7 @@ export type MarkdownOperation =
       rows: number;
       columns: number;
       tableData: string[][];
+      tableCellDeltas?: TextDelta[][][];
     }
   | {
       type: "bookmark";

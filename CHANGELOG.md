@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [1.11.2] - 2026-03-31
+
+### Fixed
+- `list_docs` now filters out deleted documents that briefly remain in GraphQL edges after workspace metadata has already dropped them.
+- Completed the delete/list_docs hardening introduced in `v1.11.1` so the visible edge list, `totalCount`, and `endCursor` stay aligned after `delete_doc`.
+
+### Tests
+- Re-ran live delete/list regression coverage against Dockerized AFFiNE `0.26.4` with `tests/test-doc-discovery.mjs`.
+
+## [1.11.1] - 2026-03-31
+
+### Fixed
+- `list_docs` now clamps stale `totalCount` metadata after `delete_doc` removes a document but AFFiNE GraphQL still reports the pre-delete count.
+- `list_docs.pageInfo.endCursor` now aligns with the last returned edge cursor after delete-driven metadata drift.
+
+### Tests
+- Added live regression coverage for delete/list count correction in `tests/test-doc-discovery.mjs`.
+
+## [1.11.0] - 2026-03-27
+
+### Added
+- Sidebar organize workflows:
+  - `list_collections`
+  - `get_collection`
+  - `create_collection`
+  - `update_collection`
+  - `delete_collection`
+  - `add_doc_to_collection`
+  - `remove_doc_from_collection`
+  - `list_organize_nodes`
+  - `create_folder`
+  - `rename_folder`
+  - `delete_folder`
+  - `move_organize_node`
+  - `add_organize_link`
+  - `delete_organize_link`
+- Tool filtering controls:
+  - `AFFINE_DISABLED_GROUPS`
+  - `AFFINE_DISABLED_TOOLS`
+- `delete_database_row` to remove existing rows from AFFiNE database blocks.
+
+### Changed
+- Tool surface expanded from 61 to 76 canonical tools.
+- Markdown import now preserves inline rich-text marks in list items and table cells.
+- CLI setup now supports non-interactive login with `affine-mcp login --url ... --token ... --workspace-id ... --force`.
+- `affine-mcp status --json` now returns machine-readable connection details.
+- `affine-mcp snippet all --env` now prints Claude, Cursor, and Codex setup in a single response.
+- README and release-facing docs now describe organize tools, tool filtering, and the new database row delete workflow.
+
+### Fixed
+- Table-cell and list-item markdown imports no longer keep literal `**...**` markers when AFFiNE rich-text attributes should be written.
+
+### Dependencies
+- Refreshed GitHub Actions, runtime lockfile entries, and development tooling, including `actions/github-script`, `jose`, `@modelcontextprotocol/sdk`, `undici`, `yjs`, `typescript`, and `@types/node`.
+
+## [1.10.1] - 2026-03-18
+
+### Changed
+- Refreshed packaged `README.md` and release metadata so the published v1.10.x docs match the shipped toolset.
+- `.github/workflows/npm-publish.yml` now runs Docker-backed `npm run test:e2e` before `npm publish`.
+- `CONTRIBUTING.md` now documents the release workflow and the `RELEASE_NOTES.md` source-of-truth convention.
+
+## [1.10.0] - 2026-03-18
+
+### Added
+- Document discovery and navigation workflows:
+  - `search_docs`
+  - `get_doc_by_title`
+  - `get_docs_by_tag`
+  - `list_children`
+  - `list_backlinks`
+  - `get_orphan_docs`
+  - `list_workspace_tree`
+- Document utility workflows:
+  - `batch_create_docs`
+  - `create_doc_from_template`
+  - `duplicate_doc`
+  - `move_doc`
+  - `cleanup_orphan_embeds`
+  - `find_and_replace`
+  - `update_doc_title`
+- Optional OAuth-protected HTTP mode for remote MCP deployments.
+- Focused HTTP transport regression coverage for bearer, OAuth, and email/password multi-session flows.
+
+### Changed
+- Toolset expanded from 47 to 61 canonical tools.
+- CLI usability and setup guidance improved with richer diagnostics and ready-to-paste config snippets.
+- `test:e2e` now validates HTTP email/password multi-session auth alongside bearer and OAuth HTTP coverage.
+
+### Fixed
+- `list_docs` titles are restored from workspace metadata snapshots.
+- HTTP transport now preserves email/password credentials across fresh sessions so repeated Streamable HTTP connections can re-authenticate successfully.
+
+## [1.9.0] - 2026-03-10
+
+### Added
+- `read_database_columns` to expose database schema metadata for empty or sparsely populated AFFiNE databases.
+- Preset-backed `data_view` creation for kanban-oriented AFFiNE database views.
+- Focused supporting-tools regression coverage via `npm run test:supporting-tools`.
+- Markdown callout round-trips for admonition-style import/export flows.
+
+### Changed
+- `test:comprehensive` now self-bootstraps a local Docker AFFiNE stack and provides a raw mode for pre-provisioned environments.
+- `test:e2e` now isolates Docker stacks per run and seeds data-view state before Playwright verification.
+- README release history was trimmed in favor of dedicated changelog and release-note sources.
+
+### Fixed
+- Empty database workflows no longer depend on existing rows to discover column names, IDs, types, and view mappings.
+- Reduced Docker bootstrap flakiness in the E2E pipeline by isolating Compose projects and staging startup checks.
+- Prevented the E2E Playwright suite from failing on missing `test-data-view-state.json` by adding the data-view setup phase.
+
+## [1.8.0] - 2026-03-09
+
+### Added
+- Database cell workflows:
+  - `read_database_cells`
+  - `update_database_cell`
+  - `update_database_row`
+- CLI version commands:
+  - `affine-mcp --version`
+  - `affine-mcp -v`
+  - `affine-mcp version`
+- Focused regression runners:
+  - `npm run test:db-cells`
+  - `npm run test:cli-version`
+
+### Changed
+- Tool surface expanded from 43 to 46 canonical tools.
+- Database workflows now support row title persistence and cell-level sync for Kanban-oriented databases.
+- README and release documentation now describe the new database cell workflows and CLI version support.
+
+### Fixed
+- `add_database_row` now persists `title` / `Title` into the built-in row paragraph used by AFFiNE Kanban card headers.
+- CLI version handling now exits early without starting the server, including forwarded wrapper args such as `affine-mcp -- --version`.
+
 ## [1.7.2] - 2026-03-04
 
 ### Added
@@ -25,7 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker E2E credential bootstrap now emits health-check configuration and retries credential acquisition before failing.
 
 ### Fixed
-- Resolved issue where tags persisted via MCP were not visible in AFFiNE Web/App UI.
+- Resolved issue where tags persisted via MCP were not visible in the AFFiNE UI.
 - Reduced CI flakiness from transient AFFiNE container startup timing by adding retry and on-failure Docker diagnostics.
 
 ## [1.7.1] - 2026-03-03
@@ -221,6 +358,13 @@ Document create/edit/delete is now supported. These are synchronized to real AFF
 - User management
 - Access tokens
 
+[1.11.2]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.11.2
+[1.11.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.11.1
+[1.11.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.11.0
+[1.10.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.10.1
+[1.10.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.10.0
+[1.9.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.9.0
+[1.8.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.8.0
 [1.7.2]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.7.2
 [1.7.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.7.1
 [1.7.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.7.0
@@ -233,4 +377,4 @@ Document create/edit/delete is now supported. These are synchronized to real AFF
 [1.4.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.4.0
 [1.3.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.3.0
 [1.6.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.6.0
-[Unreleased]: https://github.com/dawncr0w/affine-mcp-server/compare/v1.7.2...HEAD
+[Unreleased]: https://github.com/dawncr0w/affine-mcp-server/compare/v1.11.2...HEAD

@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server that integrates with AFFiNE (self‑hosted or cloud). It exposes AFFiNE workspaces and documents to AI assistants over stdio (default) or HTTP (`/mcp`).
 
-[![Version](https://img.shields.io/badge/version-1.7.2-blue)](https://github.com/dawncr0w/affine-mcp-server/releases)
+[![Version](https://img.shields.io/badge/version-1.11.2-blue)](https://github.com/dawncr0w/affine-mcp-server/releases)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.17.2-green)](https://github.com/modelcontextprotocol/typescript-sdk)
 [![CI](https://github.com/dawncr0w/affine-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/dawncr0w/affine-mcp-server/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
@@ -16,16 +16,17 @@ A Model Context Protocol (MCP) server that integrates with AFFiNE (self‑hosted
 - Purpose: Manage AFFiNE workspaces and documents through MCP
 - Transport: stdio (default) and optional HTTP (`/mcp`) for remote MCP deployments
 - Auth: Token, Cookie, or Email/Password (priority order)
-- Tools: 43 focused tools with WebSocket-based document editing
+- Tools: 76 focused tools with WebSocket-based document editing
 - Status: Active
  
-> New in v1.7.2: Fixed tag visibility parity in AFFiNE Web/App for MCP-created tags and hardened Docker E2E startup reliability with retry/diagnostics.
+> New in v1.11.2: Corrected stale deleted-document visibility in `list_docs` after `delete_doc`, completing the `v1.11.1` delete-metadata fix.
 
 ## Features
 
 - Workspace: create (with initial doc), read, update, delete
 - Documents: list/get/read/publish/revoke + create/append/replace/delete + markdown import/export + tags (WebSocket‑based)
-- Database workflows: create database blocks, then add columns/rows via MCP tools
+- Sidebar data: collections, folders, and organize links for AFFiNE workspace trees
+- Database workflows: create database blocks, inspect schema, add/update/delete rows, and read or update cell values via MCP tools
 - Comments: full CRUD and resolve
 - Version History: list
 - Users & Tokens: current user, sign in, profile/settings, and personal access tokens
@@ -118,8 +119,18 @@ The MCP server will use these credentials automatically.
 ```
 
 Other CLI commands:
+- `affine-mcp --help` / `-h` / `help` — show command help
 - `affine-mcp status` — show current config and test connection
+- `affine-mcp status --json` — machine-readable status output
+- `affine-mcp doctor` — run config and connectivity diagnostics
+- `affine-mcp show-config` — print the effective config with secrets redacted
+- `affine-mcp config-path` — print the config file path
+- `affine-mcp snippet <claude|cursor|codex|all> [--env]` — print ready-to-paste client configuration snippets
 - `affine-mcp logout` — remove stored credentials
+- `affine-mcp --version` / `-v` / `version` — print the installed CLI version and exit
+
+Non-interactive login helpers:
+- `affine-mcp login --url <url> --token <token> --workspace-id <id> --force`
 
 ### Environment variables
 
@@ -128,6 +139,7 @@ You can also configure via environment variables (they override the config file)
 - Required: `AFFINE_BASE_URL`
 - Auth (choose one): `AFFINE_API_TOKEN` | `AFFINE_COOKIE` | `AFFINE_EMAIL` + `AFFINE_PASSWORD`
 - Optional: `AFFINE_GRAPHQL_PATH` (default `/graphql`), `AFFINE_WORKSPACE_ID`, `AFFINE_LOGIN_AT_START` (set `sync` only when you must block startup)
+- Tool filtering: `AFFINE_DISABLED_GROUPS`, `AFFINE_DISABLED_TOOLS` (see [Filtering Exposed Tools](#filtering-exposed-tools))
 
 Authentication priority:
 1) `AFFINE_API_TOKEN` → 2) `AFFINE_COOKIE` → 3) `AFFINE_EMAIL` + `AFFINE_PASSWORD`
@@ -210,6 +222,9 @@ Or with email/password for self-hosted instances (not supported on AFFiNE Cloud 
 Tips
 - Prefer `affine-mcp login` or `AFFINE_API_TOKEN` for zero‑latency startup.
 - If your password contains `!` (zsh history expansion), wrap it in single quotes in shells or use the JSON config above.
+- `affine-mcp doctor` is the fastest way to confirm that your saved config still works.
+- `affine-mcp snippet claude --env` and `affine-mcp snippet codex --env` can generate ready-to-paste client setup from your current config.
+- `affine-mcp snippet all --env` prints Claude, Cursor, and Codex setup in one shot.
 
 ### Codex CLI
 
@@ -270,12 +285,16 @@ If you want to host the server remotely (e.g., using Render, Railway, Docker, or
 Required:
 - `MCP_TRANSPORT=http`
 - `AFFINE_BASE_URL` (example: `https://app.affine.pro`)
-- One auth method:
+- `AFFINE_MCP_AUTH_MODE=bearer` (default) or `AFFINE_MCP_AUTH_MODE=oauth`
+
+Bearer mode backend auth:
 - `AFFINE_API_TOKEN` (recommended), or `AFFINE_COOKIE`, or `AFFINE_EMAIL` + `AFFINE_PASSWORD`
+
+OAuth mode backend auth:
+- `AFFINE_API_TOKEN` (required service credential for AFFiNE backend access)
 
 Recommended for remote/public deployments:
 - `AFFINE_MCP_HTTP_HOST=0.0.0.0`
-- `AFFINE_MCP_HTTP_TOKEN=<strong-random-token>` (protects `/mcp`, `/sse`, `/messages`)
 - `AFFINE_MCP_HTTP_ALLOWED_ORIGINS=<comma-separated-origins>` (for browser clients)
 
 Optional:
@@ -284,31 +303,68 @@ Optional:
 - `AFFINE_GRAPHQL_PATH` (defaults to `/graphql`)
 - `AFFINE_MCP_HTTP_ALLOW_ALL_ORIGINS=true` (testing only)
 
+Bearer-mode only:
+- `AFFINE_MCP_HTTP_TOKEN=<strong-random-token>` (protects `/mcp`, `/sse`, `/messages`)
+
+OAuth-mode only:
+- `AFFINE_MCP_PUBLIC_BASE_URL=https://mcp.yourdomain.com`
+- `AFFINE_OAUTH_ISSUER_URL=https://auth.yourdomain.com`
+- `AFFINE_OAUTH_SCOPES=mcp` (defaults to `mcp`)
+
+#### HTTP auth modes
+
+`AFFINE_MCP_AUTH_MODE=bearer` keeps the current static bearer-token behavior.
+
 ```bash
-# Export your configuration first
 export MCP_TRANSPORT=http
+export AFFINE_MCP_AUTH_MODE=bearer
 export AFFINE_API_TOKEN="your_token..."
-export AFFINE_MCP_HTTP_HOST="0.0.0.0" # Default: 127.0.0.1
+export AFFINE_MCP_HTTP_HOST="0.0.0.0"
 export AFFINE_MCP_HTTP_TOKEN="your-super-secret-token"
 export PORT=3000
 
-# Start in HTTP mode (Streamable HTTP on /mcp)
 npm run start:http
-# OR manually:
-# MCP_TRANSPORT=http node dist/index.js
-# ("sse" is still accepted at /sse)
 ```
+
+`AFFINE_MCP_AUTH_MODE=oauth` turns the MCP endpoint into an OAuth-protected resource for web MCP clients. In this mode:
+- the server exposes `/.well-known/oauth-protected-resource`
+- unauthenticated `/mcp` requests return `401` with a `WWW-Authenticate` challenge
+- `AFFINE_MCP_HTTP_TOKEN` and `?token=` are disabled
+- `sign_in` is not registered
+- `AFFINE_API_TOKEN` is still required so the server can call AFFiNE as a service credential
+
+```bash
+export MCP_TRANSPORT=http
+export AFFINE_MCP_AUTH_MODE=oauth
+export AFFINE_API_TOKEN="your-affine-service-token"
+export AFFINE_MCP_HTTP_HOST="0.0.0.0"
+export AFFINE_MCP_PUBLIC_BASE_URL="https://mcp.yourdomain.com"
+export AFFINE_OAUTH_ISSUER_URL="https://auth.yourdomain.com"
+export AFFINE_OAUTH_SCOPES="mcp"
+export PORT=3000
+
+npm run start:http
+```
+
+Notes for OAuth mode:
+- use HTTPS for non-local deployments
+- `AFFINE_MCP_HTTP_ALLOW_ALL_ORIGINS=true` is rejected in OAuth mode
+- tokens are validated against the issuer discovery metadata and JWKS
+- the protected resource metadata is also served at `/.well-known/oauth-protected-resource/mcp` for path-specific discovery
+- `GET /healthz` and `GET /readyz` are available for deployment diagnostics
 
 #### Recommended presets
 
 Local testing (HTTP mode):
 - `MCP_TRANSPORT=http`
+- `AFFINE_MCP_AUTH_MODE=bearer`
 - `AFFINE_MCP_HTTP_HOST=127.0.0.1`
 - `AFFINE_MCP_HTTP_TOKEN=<token>` (recommended even locally)
 - `AFFINE_MCP_HTTP_ALLOWED_ORIGINS=http://localhost:3000` (if testing from a browser app)
 
 Docker / container runtime:
 - `MCP_TRANSPORT=http`
+- `AFFINE_MCP_AUTH_MODE=bearer`
 - `AFFINE_MCP_HTTP_HOST=0.0.0.0`
 - `PORT=3000` (or container/platform port)
 - `AFFINE_MCP_HTTP_TOKEN=<strong-token>`
@@ -316,14 +372,20 @@ Docker / container runtime:
 
 Render / Railway / VPS (public endpoint):
 - `MCP_TRANSPORT=http`
+- `AFFINE_MCP_AUTH_MODE=bearer` or `oauth`
 - `AFFINE_MCP_HTTP_HOST=0.0.0.0`
-- `AFFINE_MCP_HTTP_TOKEN=<strong-token>`
+- `AFFINE_MCP_HTTP_TOKEN=<strong-token>` (bearer mode)
+- `AFFINE_MCP_PUBLIC_BASE_URL=<public base URL>` (OAuth mode)
+- `AFFINE_OAUTH_ISSUER_URL=<issuer URL>` (OAuth mode)
 - `AFFINE_MCP_HTTP_ALLOWED_ORIGINS=<your client origin(s)>`
 
 Endpoints currently available:
 - `/mcp` - MCP server (Streamable HTTP)
 - `/sse` - SSE endpoint (old protocol compatible)
 - `/messages` - Messages endpoint (old protocol compatible)
+- `/healthz` - HTTP liveness probe
+- `/readyz` - HTTP readiness probe
+
 
 ## Available Tools
 
@@ -333,6 +395,25 @@ Endpoints currently available:
 - `create_workspace` – create workspace with initial document
 - `update_workspace` – update workspace settings
 - `delete_workspace` – delete workspace permanently
+- `list_workspace_tree` – return the workspace document hierarchy as a tree
+- `get_orphan_docs` – find documents that are not linked from any parent doc in the sidebar tree
+
+### Organization
+- `list_collections` – list workspace collections
+- `get_collection` – get a collection by id
+- `create_collection` – create a collection
+- `update_collection` – rename a collection
+- `delete_collection` – delete a collection
+- `add_doc_to_collection` – add a document to a collection allow-list
+- `remove_doc_from_collection` – remove a document from a collection allow-list
+- `list_organize_nodes` – experimental organize/folder tree dump
+- `create_folder` – experimental root or nested folder creation
+- `rename_folder` – experimental folder rename
+- `delete_folder` – experimental recursive folder delete
+- `move_organize_node` – experimental folder/link move
+- `add_organize_link` – experimental doc/tag/collection link under a folder
+- `delete_organize_link` – experimental doc/tag/collection link delete
+
 
 ### Collections
 - `list_collections` – list all collections in a workspace
@@ -344,23 +425,40 @@ Endpoints currently available:
 ### Documents
 - `list_docs` – list documents with pagination (includes `node.tags`)
 - `list_tags` – list all tags in a workspace
-- `list_docs_by_tag` – list documents by tag
+- `search_docs` – fast title search with substring/prefix/exact matching, optional tag filtering, and updatedAt sorting
+- `list_docs_by_tag` – list documents that contain the requested tag
+- `get_docs_by_tag` – discover documents by case-insensitive tag substring and return `availableTags` when nothing matches
 - `get_doc` – get document metadata
+- `get_doc_by_title` – find a document by title and return its Markdown content
 - `read_doc` – read document block content and plain text snapshot (WebSocket)
 - `export_doc_markdown` – export document content as markdown
 - `publish_doc` – make document public
 - `revoke_doc` – revoke public access
 - `create_doc` – create a new document (WebSocket)
 - `create_doc_from_markdown` – create a document from markdown content
+- `create_doc_from_template` – clone a template doc, substitute `{{variables}}`, and optionally link it under a parent doc
+- `duplicate_doc` – clone a document into a new doc, optionally under a parent doc
 - `create_tag` – create a reusable workspace-level tag
 - `add_tag_to_doc` – attach a tag to a document
 - `remove_tag_from_doc` – detach a tag from a document
+- `update_doc_title` – rename a document in both workspace metadata and the internal page block
 - `append_paragraph` – append a paragraph block (WebSocket)
-- `append_block` – append canonical block types (text/list/code/media/embed/database/edgeless) with strict validation and placement control (`data_view` currently falls back to database)
+- `append_block` – append canonical block types (text/list/code/media/embed/database/edgeless) with strict validation and placement control (`viewMode=kanban` enables preset-backed data views; `data_view` defaults to kanban)
+- `move_doc` – move a document in the sidebar by relinking it under a different parent
+- `batch_create_docs` – create up to 20 documents in a single call
 - `add_database_column` – add a column to a database block (`rich-text`, `select`, `multi-select`, `number`, `checkbox`, `link`, `date`)
-- `add_database_row` – add a row to a database block with values mapped by column name/ID
+- `add_database_row` – add a row to a database block with values mapped by column name/ID (`title` / `Title` updates the built-in row title)
+- `delete_database_row` – delete a row from a database block by row block id
+- `read_database_columns` – read database schema metadata including column IDs/types, select options, and table view column mappings
+- `read_database_cells` – read row titles plus decoded database cell values with optional row / column filters
+- `update_database_cell` – update a single database cell or the built-in row title (`createOption` defaults to `true` for select fields)
+- `update_database_row` – batch update multiple cells on a database row (`createOption` defaults to `true` for select fields)
 - `append_markdown` – append markdown content to an existing document
 - `replace_doc_with_markdown` – replace the main note content with markdown content
+- `list_children` – list the direct child docs linked from a document
+- `list_backlinks` – list the parent/reference docs that link to a document
+- `cleanup_orphan_embeds` – remove linked-doc embeds that point to missing docs
+- `find_and_replace` – preview or apply text replacement across a document
 - `delete_doc` – delete a document (WebSocket)
 
 ### Comments
@@ -378,6 +476,40 @@ Endpoints currently available:
 
 ### Blob Storage
 - `upload_blob`, `delete_blob`, `cleanup_blobs`
+
+## Filtering Exposed Tools
+
+Optional environment variables to narrow the exposed surface. 
+
+### Group-level — `AFFINE_DISABLED_GROUPS`
+
+| Group name | Tools included |
+|---|---|
+| `workspaces` | `list_workspaces`, `get_workspace`, `create_workspace`, `update_workspace`, `delete_workspace` |
+| `docs` | `list_docs`, `read_doc`, `search_docs`, `create_doc`, `create_doc_from_markdown`, `create_doc_from_template`, `duplicate_doc`, `append_paragraph`, `append_block`, `append_markdown`, `replace_doc_with_markdown`, `delete_doc`, `publish_doc`, `revoke_doc`, `list_tags`, `list_docs_by_tag`, `create_tag`, `add_tag_to_doc`, `remove_tag_from_doc`, `list_workspace_tree`, `get_orphan_docs`, `list_children`, `update_doc_title`, `get_doc_by_title`, `get_docs_by_tag`, `list_backlinks`, `move_doc`, `batch_create_docs`, `cleanup_orphan_embeds`, `find_and_replace`, `add_database_column`, `add_database_row`, `delete_database_row`, `read_database_columns`, `read_database_cells`, `update_database_cell`, `update_database_row` |
+| `comments` | `list_comments`, `create_comment`, `update_comment`, `delete_comment`, `resolve_comment` |
+| `history` | `list_histories` |
+| `organize` | `list_collections`, `get_collection`, `create_collection`, `update_collection`, `delete_collection`, `add_doc_to_collection`, `remove_doc_from_collection`, `list_organize_nodes`, `create_folder`, `rename_folder`, `delete_folder`, `move_organize_node`, `add_organize_link`, `delete_organize_link` |
+| `users` | `current_user`, `sign_in`, `update_profile`, `update_settings` |
+| `access_tokens` | `list_access_tokens`, `generate_access_token`, `revoke_access_token` |
+| `blobs` | `upload_blob`, `delete_blob`, `cleanup_blobs` |
+| `notifications` | `list_notifications`, `read_all_notifications` |
+
+```json
+"env": {
+  "AFFINE_DISABLED_GROUPS": "comments,history,blobs,users"
+}
+```
+
+### Tool-level — `AFFINE_DISABLED_TOOLS`
+
+Disables individual tools by exact name (comma-separated). 
+
+```json
+"env": {
+  "AFFINE_DISABLED_TOOLS": "delete_workspace,delete_doc"
+}
+```
 
 ## Use Locally (clone)
 
@@ -417,9 +549,10 @@ npm run pack:check
 
 - `tool-manifest.json` is the source of truth for publicly exposed tool names.
 - CI validates that `registerTool(...)` declarations match the manifest exactly.
-- For full tool-surface verification, run `npm run test:comprehensive`.
+- For full tool-surface verification, run `npm run test:comprehensive` (self-bootstraps a local Docker AFFiNE stack).
+- For pre-provisioned environments, use `npm run test:comprehensive:raw`.
 - For full environment verification, run `npm run test:e2e` (Docker + MCP + Playwright).
-- Additional focused runners: `npm run test:db-create`, `npm run test:bearer`, `npm run test:playwright`.
+- Additional focused runners: `npm run test:db-create`, `npm run test:db-cells`, `npm run test:db-schema`, `npm run test:supporting-tools`, `npm run test:organize`, `npm run test:bearer`, `npm run test:http-email-password`, `npm run test:http-bearer`, `npm run test:oauth-http`, `npm run test:doc-discovery`, `npm run test:cli-version`, `npm run test:cli-commands`, `npm run test:cli-live`, `npm run test:tool-filtering`, `npm run test:markdown-rich-text-import`, `npm run test:playwright`.
 
 ## Troubleshooting
 
@@ -452,76 +585,11 @@ Workspace visibility
 - Use HTTPS
 - Store credentials in a secrets manager
 
-## Version History
+## Release Notes
 
-### 1.7.2 (2026‑03‑04)
-- Fixed MCP tag persistence to use AFFiNE canonical tag option IDs so tags are visible in Web/App UI
-- Added backward-compatible tag normalization for legacy string tag entries
-- Added tag visibility regression coverage (`tests/test-tag-visibility.mjs`, `tests/playwright/verify-tag-visibility.pw.ts`)
-- Hardened E2E credential bootstrap with configurable health retries, retry attempts, and Docker diagnostics on failure
-- Verified CI gates (`validate`, `e2e`) for PR #46 and local `npm run ci`
-
-### 1.7.1 (2026‑03‑03)
-- Fixed MCP-created document structure parity with AFFiNE UI (`sys:parent` handling)
-- Fixed callout text rendering parity in AFFiNE UI for MCP-created blocks
-- Added regression assertions for visibility-sensitive document creation paths
-
-### 1.7.0 (2026‑02‑27)
-- Added Streamable HTTP MCP support on `/mcp` for remote hosting while keeping legacy SSE compatibility paths (`/sse`, `/messages`)
-- Added HTTP deployment controls: `AFFINE_MCP_HTTP_HOST`, `AFFINE_MCP_HTTP_TOKEN`, `AFFINE_MCP_HTTP_ALLOWED_ORIGINS`, `AFFINE_MCP_HTTP_ALLOW_ALL_ORIGINS`
-- Added `npm run start:http` for one-command HTTP mode startup
-- Hardened HTTP request handling with explicit 50MB parser application and case-insensitive Bearer auth parsing
-- Expanded docs with remote deployment/security presets (Docker, Render, Railway, VPS)
-- Verified full release checks with `npm run ci`, `npm run test:e2e`, and `npm run test:comprehensive`
-
-### 1.6.0 (2026‑02‑24)
-- Added 11 document workflow tools: tags (`list_tags`, `list_docs_by_tag`, `create_tag`, `add_tag_to_doc`, `remove_tag_from_doc`), markdown roundtrip (`export_doc_markdown`, `create_doc_from_markdown`, `append_markdown`, `replace_doc_with_markdown`), and database operations (`add_database_column`, `add_database_row`)
-- Added interactive CLI commands: `affine-mcp login`, `affine-mcp status`, `affine-mcp logout`
-- Added Docker + Playwright E2E pipeline and CI workflow for auth/database regression checks
-- Tool surface increased from 32 to 43 canonical tools
-- Added release test commands (`test:e2e`, `test:db-create`, `test:bearer`, `test:playwright`) and package dependencies for markdown conversion + Playwright
-
-### 1.5.0 (2026‑02‑13)
-- Expanded `append_block` from Step1 to Step4 profiles: canonical text/list/code/divider/callout/latex/table/bookmark/media/embed plus `database`, `data_view`, `surface_ref`, `frame`, `edgeless_text`, `note` (`data_view` currently mapped to database for stability)
-- Added strict field validation and canonical parent enforcement for page/note/surface containers
-- Added local integration runner coverage for all 30 append_block cases against a live AFFINE server
-
-### 1.4.0 (2026‑02‑13)
-- Added `read_doc` for reading document block snapshot + plain text
-- Added Cursor setup examples and troubleshooting notes for JSON-RPC method usage
-- Added explicit local-storage workspace limitation notes
-
-### 1.3.0 (2026‑02‑13)
-- Added `append_block` for slash-command style editing (`heading/list/todo/code/divider/quote`)
-- Tool surface simplified to 31 canonical tools (duplicate aliases removed)
-- Added CI + manifest parity verification (`npm run test:tool-manifest`, `npm run ci`)
-- Added open-source community health docs and issue/PR templates
-
-### 1.2.2 (2025‑09‑18)
-- CLI wrapper added to ensure Node runs ESM entry (`bin/affine-mcp`), preventing shell mis-execution
-- Docs cleaned: use env vars via shell/app config; `.env` file no longer recommended
-- MCP startup behavior unchanged from 1.2.1 (async login by default)
-
-### 1.2.1 (2025‑09‑17)
-- Default to asynchronous email/password login after MCP stdio handshake
-- `AFFINE_LOGIN_AT_START` supports `sync` when you need blocking startup (default is non-blocking)
-- Expanded docs for Codex/Claude using npm, npx, and local clone
-
-### 1.2.0 (2025‑09‑16)
-- WebSocket-based document tools: `create_doc`, `append_paragraph`, `delete_doc` (create/edit/delete now supported)
-- Tool aliases introduced at the time (`affine_*` + non-prefixed names). They were removed later to reduce duplication.
-- ESM resolution: NodeNext; improved build stability
-- CLI binary: `affine-mcp` for easy `npm i -g` usage
-
-### 1.1.0 (2025‑08‑12)
-- Fixed workspace creation with initial documents (UI accessible)
-- 30+ tools, simplified tool names
-- Improved error handling and authentication
-
-### 1.0.0 (2025‑08‑12)
-- Initial stable release
-- Basic workspace and document operations
-- Full authentication support
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- GitHub Releases: [Releases](https://github.com/dawncr0w/affine-mcp-server/releases)
 
 ## Contributing
 
